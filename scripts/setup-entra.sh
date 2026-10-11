@@ -7,8 +7,9 @@
 #                        delegated permission on the downstream API scope (+ openid/profile/offline_access),
 #                        token service redirect URI, client secret, admin consent
 #
-# Then writes bot/.env and downstream-api/.env (if they don't exist yet).
-# Requires: Azure CLI logged in (`az login`) as someone who can create apps and grant admin consent.
+# Then stores the settings for both projects with `dotnet user-secrets` (kept outside the repo).
+# Requires: Azure CLI logged in (`az login`) as someone who can create apps and grant admin consent,
+# and the .NET SDK.
 # Review before running - it creates new app registrations every time it runs.
 set -euo pipefail
 
@@ -29,6 +30,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 command -v az >/dev/null || { echo "Azure CLI (az) is required: https://aka.ms/azcli" >&2; exit 1; }
+command -v dotnet >/dev/null || { echo ".NET SDK (dotnet) is required: https://dot.net" >&2; exit 1; }
 
 uuid() { if command -v uuidgen >/dev/null; then uuidgen | tr '[:upper:]' '[:lower:]'; else cat /proc/sys/kernel/random/uuid; fi; }
 
@@ -119,40 +121,30 @@ if ! az ad app permission admin-consent --id "$BOT_APP_ID"; then
   echo "         API permissions > Grant admin consent for <tenant>." >&2
 fi
 
-# --- 4. .env files -----------------------------------------------------------------------------
-write_env() { # <file> <content>
-  if [[ -e "$1" ]]; then
-    echo "NOT overwriting existing $1 - merge these values yourself:"
-    echo "$2" | sed 's/^/    /'
-  else
-    printf '%s\n' "$2" >"$1"
-    echo "Wrote $1"
-  fi
-}
+# --- 4. Local settings (dotnet user-secrets, outside the repo) ---------------------------------
+echo "Storing settings with dotnet user-secrets..."
+secret() { dotnet user-secrets set "$2" "$3" --project "$ROOT/src/$1" >/dev/null; }
 
-write_env "$ROOT/downstream-api/.env" "TENANT_ID=$TENANT_ID
-API_CLIENT_ID=$API_APP_ID
-PORT=5000"
+secret DownstreamApi "AzureAd:TenantId" "$TENANT_ID"
+secret DownstreamApi "AzureAd:ClientId" "$API_APP_ID"
 
-write_env "$ROOT/bot/.env" "CLIENT_ID=$BOT_APP_ID
-CLIENT_SECRET=$BOT_SECRET
-TENANT_ID=$TENANT_ID
-OAUTH_CONNECTION_NAME=sso
-DOWNSTREAM_API_URL=http://localhost:5000/api/me
-DOWNSTREAM_API_SCOPES=api://$API_APP_ID/access_as_user
-TOKEN_STRATEGY=obo
-SHOW_DIAGNOSTICS=true
-PORT=3978"
+secret Bot "AzureAd:TenantId" "$TENANT_ID"
+secret Bot "AzureAd:ClientId" "$BOT_APP_ID"
+secret Bot "AzureAd:ClientCredentials:0:SourceType" "ClientSecret"
+secret Bot "AzureAd:ClientCredentials:0:ClientSecret" "$BOT_SECRET"
+secret Bot "DownstreamApi:Scopes:0" "api://$API_APP_ID/access_as_user"
 
 cat <<EOF
 
-Done. Next (docs/azure-setup.md, steps 3-4):
+Done. Next (docs/azure-setup.md, steps 3-6):
   - Create an Azure Bot (single tenant) with Microsoft App ID $BOT_APP_ID
     and messaging endpoint https://<your-tunnel>/api/messages, and enable the Teams channel.
   - Add an OAuth connection named "sso" (Azure Active Directory v2):
       Client id          $BOT_APP_ID
-      Client secret      (the CLIENT_SECRET in bot/.env)
+      Client secret      dotnet user-secrets list --project src/Bot   (AzureAd:ClientCredentials:0:ClientSecret)
       Token Exchange URL api://botid-$BOT_APP_ID
       Tenant ID          $TENANT_ID
       Scopes             api://$API_APP_ID/access_as_user
+  - Package the Teams app:
+      dotnet run scripts/package-app.cs -- $BOT_APP_ID
 EOF

@@ -1,0 +1,237 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
+using Microsoft.Identity.Client;
+using Microsoft.IdentityModel.JsonWebTokens;
+using TeamsSsoBot;
+using TeamsSsoBot.Sso;
+using TestSupport;
+
+namespace Bot.Tests;
+
+/// <summary>
+/// End to end: the real bot (Teams SDK pipeline on POST /api/messages) + the real downstream API
+/// (Microsoft.Identity.Web), with only the parts that live in Microsoft's cloud simulated:
+/// <list type="bullet">
+/// <item>Entra ID: a local signing key, and a fake OBO call that mints the downstream token.</item>
+/// <item>Bot Framework token service: a stub returning a sign-in link + tokenExchangeResource.</item>
+/// <item>Teams client: this test, which re-sends the invoke with an SSO token after the 401.</item>
+/// </list>
+/// </summary>
+public sealed class EndToEndTests : IDisposable
+{
+    private readonly TestTenant _tenant = new();
+    private readonly DownstreamApiFactory _api;
+    private readonly BotFactory _bot;
+    private readonly HttpClient _client;
+    private readonly FakeEntraObo _obo;
+
+    public EndToEndTests()
+    {
+        _api = new DownstreamApiFactory(_tenant);
+        _obo = new FakeEntraObo(_tenant);
+        _bot = new BotFactory(_tenant, _api, _obo);
+        _client = _bot.CreateClient();
+    }
+
+    private async Task<JsonNode> Invoke(object? authentication = null, string verb = Cards.CallApiVerb, string? aadObjectId = TestTenant.UserOid)
+    {
+        var activity = new
+        {
+            type = "invoke",
+            name = "adaptiveCard/action",
+            id = "activity-1",
+            channelId = "msteams",
+            serviceUrl = "https://smba.trafficmanager.net/teams/",
+            from = new { id = "29:user-1", name = "Adele Vance", aadObjectId },
+            recipient = new { id = "28:" + TestTenant.BotClientId, name = "bot" },
+            conversation = new { id = "a:conversation-1", conversationType = "personal", tenantId = TestTenant.TenantId },
+            channelData = new { tenant = new { id = TestTenant.TenantId } },
+            value = new
+            {
+                action = new { type = "Action.Execute", verb, data = new { action = verb } },
+                trigger = "manual",
+                authentication,
+            },
+        };
+
+        var response = await _client.PostAsJsonAsync("/api/messages", activity, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode); // invoke responses travel in the HTTP body
+        return (await response.Content.ReadFromJsonAsync<JsonNode>(TestContext.Current.CancellationToken))!;
+    }
+
+    private static object Sso(string token) => new { id = "ter-1", connectionName = "sso", token };
+
+    [Fact]
+    public async Task First_click_asks_Teams_for_an_sso_token()
+    {
+        var body = await Invoke();
+
+        Assert.Equal(401, (int)body["statusCode"]!);
+        Assert.Equal("application/vnd.microsoft.activity.loginRequest", (string)body["type"]!);
+        Assert.Equal(TestTenant.BotAppIdUri, (string)body["value"]!["tokenExchangeResource"]!["uri"]!);
+        Assert.Equal("signin", (string)body["value"]!["buttons"]![0]!["type"]!);
+    }
+
+    [Fact]
+    public async Task Retry_with_sso_token_runs_obo_and_the_api_sees_the_real_user()
+    {
+        var ssoToken = _tenant.SsoToken();
+
+        var body = await Invoke(Sso(ssoToken));
+
+        var call = Assert.Single(_obo.Calls);
+        Assert.Equal(ssoToken, call.Assertion);
+        Assert.Equal([TestTenant.ApiAppIdUri + "/access_as_user"], call.Scopes);
+
+        Assert.Equal(200, (int)body["statusCode"]!);
+        Assert.Equal("application/vnd.microsoft.card.adaptive", (string)body["type"]!);
+        var text = body["value"]!.ToJsonString();
+        Assert.Contains("Hello Adele Vance, the downstream API accepted your token.", text);
+        Assert.Contains(TestTenant.UserOid, text);
+        Assert.Contains("Teams SSO, then the bot ran on-behalf-of with MSAL", text);
+
+        // The chain: the API saw a token for itself requested by the bot; the bot saw a token for itself requested by Teams.
+        var facts = body["value"]!["body"]!.AsArray()
+            .Where(b => (string?)b!["type"] == "FactSet")
+            .SelectMany(b => b!["facts"]!.AsArray())
+            .Select(f => ((string)f!["title"]!, (string)f["value"]!))
+            .ToList();
+        Assert.Contains(("aud", TestTenant.ApiClientId), facts);
+        Assert.Contains(("azp/appid (caller)", TestTenant.BotClientId), facts);
+        Assert.Contains(("aud", TestTenant.BotClientId), facts);
+        Assert.Contains(("azp/appid (caller)", TestTenant.TeamsDesktopClientId + " (Teams desktop/mobile)"), facts);
+    }
+
+    [Fact]
+    public async Task Accepts_a_v1_sso_token_end_to_end()
+    {
+        var body = await Invoke(Sso(_tenant.SsoToken(TestTenant.AsV1(TestTenant.BotAppIdUri))));
+
+        Assert.Equal(200, (int)body["statusCode"]!);
+        Assert.Contains("the downstream API accepted your token", body["value"]!.ToJsonString());
+    }
+
+    [Fact]
+    public async Task Rejects_an_sso_token_belonging_to_another_user()
+    {
+        var body = await Invoke(Sso(_tenant.SsoToken(c => c["oid"] = TestTenant.OtherUserOid)));
+
+        Assert.Equal(412, (int)body["statusCode"]!);
+        Assert.Empty(_obo.Calls);
+    }
+
+    [Fact]
+    public async Task Falls_back_to_the_sign_in_button_when_Entra_says_consent_is_missing()
+    {
+        _obo.NextError = new MsalUiRequiredException("invalid_grant", "AADSTS65001: The user or administrator has not consented to use the application");
+
+        var body = await Invoke(Sso(_tenant.SsoToken()));
+
+        Assert.Equal(401, (int)body["statusCode"]!);
+        Assert.Equal("application/vnd.microsoft.activity.loginRequest", (string)body["type"]!);
+        Assert.Null(body["value"]!["tokenExchangeResource"]);
+    }
+
+    [Fact]
+    public async Task Shows_an_error_card_with_the_Entra_error_for_configuration_problems()
+    {
+        _obo.NextError = new MsalServiceException("invalid_client", "AADSTS7000215: Invalid client secret provided.");
+
+        var body = await Invoke(Sso(_tenant.SsoToken()));
+
+        Assert.Equal(200, (int)body["statusCode"]!);
+        Assert.Equal("application/vnd.microsoft.card.adaptive", (string)body["type"]!);
+        Assert.Contains("invalid_client: AADSTS7000215: Invalid client secret provided.", body["value"]!.ToJsonString());
+    }
+
+    [Fact]
+    public async Task Unknown_verbs_get_400_instead_of_a_sign_in()
+    {
+        var body = await Invoke(verb: "deleteEverything");
+
+        Assert.Equal(400, (int)body["statusCode"]!);
+        Assert.Contains("deleteEverything", (string)body["value"]!["message"]!);
+    }
+
+    public void Dispose()
+    {
+        _client.Dispose();
+        _bot.Dispose();
+        _api.Dispose();
+        _tenant.Dispose();
+    }
+
+    /// <summary>
+    /// Stand-in for Entra's /token endpoint (grant_type=jwt-bearer, requested_token_use=on_behalf_of): checks the
+    /// assertion was issued for the bot and returns a token for the downstream API carrying the same user, azp = bot.
+    /// </summary>
+    private sealed class FakeEntraObo(TestTenant tenant) : IOboTokenAcquirer
+    {
+        public List<(string Assertion, string[] Scopes)> Calls { get; } = [];
+        public Exception? NextError { get; set; }
+
+        public Task<string> AcquireTokenOnBehalfOfAsync(string assertion, IEnumerable<string> scopes, CancellationToken cancellationToken)
+        {
+            Calls.Add((assertion, scopes.ToArray()));
+            if (NextError is { } error)
+            {
+                NextError = null;
+                throw error;
+            }
+
+            var jwt = new JsonWebToken(assertion);
+            var aud = jwt.Audiences.Single();
+            if (aud != TestTenant.BotClientId && aud != TestTenant.BotAppIdUri)
+            {
+                throw new MsalServiceException("invalid_grant", "AADSTS50013: Assertion audience does not match the client");
+            }
+
+            return Task.FromResult(tenant.DownstreamToken(c =>
+            {
+                c["oid"] = jwt.GetPayloadValue<string>("oid");
+                c["name"] = jwt.GetPayloadValue<string>("name");
+            }));
+        }
+    }
+
+    private sealed class BotFactory(TestTenant tenant, DownstreamApiFactory api, FakeEntraObo obo) : WebApplicationFactory<CardActionSso>
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("AzureAd:TenantId", TestTenant.TenantId);
+            builder.UseSetting("AzureAd:ClientId", TestTenant.BotClientId);
+            builder.UseSetting("AzureAd:ClientCredentials:0:SourceType", "ClientSecret");
+            builder.UseSetting("AzureAd:ClientCredentials:0:ClientSecret", "not-used");
+            // No Bot Connector JWT in a local test.
+            builder.UseSetting("AzureAd:DangerouslyAllowUnauthenticatedRequests", "true");
+            builder.UseSetting("Sso:BotAppIdUri", "");
+            builder.UseSetting("Sso:TokenStrategy", "Obo");
+            builder.UseSetting("DownstreamApi:Url", "http://localhost/api/me");
+            builder.UseSetting("DownstreamApi:Scopes:0", TestTenant.ApiAppIdUri + "/access_as_user");
+
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<ITokenServiceClient>();
+                services.AddSingleton<ITokenServiceClient>(new FakeTokenService());
+                services.RemoveAll<IOboTokenAcquirer>();
+                services.AddSingleton<IOboTokenAcquirer>(obo);
+                services.RemoveAll<ISsoTokenValidator>();
+                services.AddSingleton<ISsoTokenValidator>(sp => new SsoTokenValidator(
+                    sp.GetRequiredService<IOptions<BotIdentityOptions>>(),
+                    sp.GetRequiredService<IOptions<SsoOptions>>(),
+                    tenant.ConfigurationManager));
+                // The bot reaches the in-process downstream API.
+                services.AddHttpClient(DownstreamApiClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => api.Server.CreateHandler());
+            });
+        }
+    }
+}

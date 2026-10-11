@@ -5,12 +5,12 @@ package. Where this says *bot ID*, it means the bot app registration's **Applica
 
 | Value | Must be identical in |
 | --- | --- |
-| `api://botid-<bot ID>` | Bot app reg → Expose an API → Application ID URI · manifest `webApplicationInfo.resource` · OAuth connection **Token Exchange URL** · `BOT_APP_ID_URI` (default) |
-| `<bot ID>` | Bot app reg client ID · Azure Bot **Microsoft App ID** · manifest `bots[0].botId` and `webApplicationInfo.id` · `CLIENT_ID` |
-| `api://<API ID>/access_as_user` | Downstream API app reg → Expose an API scope · bot app reg → API permissions · OAuth connection **Scopes** · `DOWNSTREAM_API_SCOPES` |
+| `api://botid-<bot ID>` | Bot app reg → Expose an API → Application ID URI · manifest `webApplicationInfo.resource` · OAuth connection **Token Exchange URL** · `Sso:BotAppIdUri` (default) |
+| `<bot ID>` | Bot app reg client ID · Azure Bot **Microsoft App ID** · manifest `bots[0].botId` and `webApplicationInfo.id` · `AzureAd:ClientId` (bot) |
+| `api://<API ID>/access_as_user` | Downstream API app reg → Expose an API scope · bot app reg → API permissions · OAuth connection **Scopes** · `DownstreamApi:Scopes` (bot) |
 
 **Fast path:** `az login`, then `scripts/setup-entra.sh` does steps 1–2 (including admin consent) and
-writes both `.env` files. Then do steps 3–6 below. The script wasn't run against a live tenant while
+stores both projects' settings with `dotnet user-secrets`. Then do steps 3–6 below. The script wasn't run against a live tenant while
 this POC was built (it was dry-run against a stubbed `az`), so read it first.
 
 ---
@@ -28,13 +28,18 @@ Entra admin center → **App registrations** → **New registration**
 - **Manifest**: set `"requestedAccessTokenVersion": 2` (shown as `accessTokenAcceptedVersion` in the
   legacy manifest editor). Optional, because the sample API accepts v1 and v2 tokens.
 
-`downstream-api/.env`: `TENANT_ID`, `API_CLIENT_ID=<API ID>`.
+Settings for `src/DownstreamApi` (user-secrets or appsettings): `AzureAd:TenantId`, `AzureAd:ClientId` = API ID.
+
+```bash
+dotnet user-secrets set "AzureAd:TenantId" "<tenant ID>" --project src/DownstreamApi
+dotnet user-secrets set "AzureAd:ClientId" "<API ID>" --project src/DownstreamApi
+```
 
 ## 2. Bot app registration
 
 **New registration** → `poc-teams-sso-bot`, **single tenant** (multi-tenant bots are deprecated).
 
-1. **Certificates & secrets** → New client secret → copy it into `CLIENT_SECRET`.
+1. **Certificates & secrets** → New client secret → store it as `AzureAd:ClientCredentials:0:ClientSecret` (below).
 2. **Expose an API**
    - Application ID URI: **`api://botid-<bot ID>`**. Change it from the default `api://<bot ID>`.
    - **Add a scope**: `access_as_user`, *Admins and users*, Enabled.
@@ -54,7 +59,14 @@ Entra admin center → **App registrations** → **New registration**
    token for one to the downstream API. Without it, users get a one-time Sign in prompt, or OBO fails
    with `AADSTS65001`.
 
-`bot/.env`: `CLIENT_ID`, `CLIENT_SECRET`, `TENANT_ID`, `DOWNSTREAM_API_SCOPES=api://<API ID>/access_as_user`.
+Settings for `src/Bot`. Keep the secret out of `appsettings.json`:
+
+```bash
+dotnet user-secrets set "AzureAd:TenantId" "<tenant ID>" --project src/Bot
+dotnet user-secrets set "AzureAd:ClientId" "<bot ID>" --project src/Bot
+dotnet user-secrets set "AzureAd:ClientCredentials:0:ClientSecret" "<secret>" --project src/Bot
+dotnet user-secrets set "DownstreamApi:Scopes:0" "api://<API ID>/access_as_user" --project src/Bot
+```
 
 ## 3. Azure Bot resource
 
@@ -81,7 +93,7 @@ Azure Bot → **Configuration** → **Add OAuth Connection Settings**
 
 | Field | Value |
 | --- | --- |
-| Name | `sso` (= `OAUTH_CONNECTION_NAME`) |
+| Name | `sso` (= `Sso:OAuthConnectionName`) |
 | Service Provider | **Azure Active Directory v2** |
 | Client id | bot ID |
 | Client secret | the bot's secret |
@@ -92,7 +104,7 @@ Azure Bot → **Configuration** → **Add OAuth Connection Settings**
 Save, then select **Test connection**. You should sign in and get a token whose `aud` is the downstream API.
 
 The bot uses this connection to build the loginRequest (sign-in link + `tokenExchangeResource`) and
-for the fallback sign-in. With `TOKEN_STRATEGY=token-service`, it also does the OBO exchange.
+for the fallback sign-in. With `Sso:TokenStrategy` = `TokenService`, it also does the OBO exchange.
 
 CLI equivalent (check the parameter names with `az bot authsetting list-providers --provider-name Aadv2`):
 
@@ -106,22 +118,21 @@ az bot authsetting create -g rg-teams-sso-poc -n <unique-bot-name> -c sso --serv
 ## 5. Run locally
 
 ```bash
-npm install
-npm run dev:api     # :5000
-npm run dev:bot     # :3978, the tunnel from step 3 must point here
+dotnet run --project src/DownstreamApi   # :5000
+dotnet run --project src/Bot             # :3978, the tunnel from step 3 must point here
 ```
 
 ## 6. Teams app package
 
 ```bash
-npm run package:app   # reads bot/.env -> appPackage/build/appPackage.zip
+dotnet run scripts/package-app.cs -- <bot ID>   # -> appPackage/build/appPackage.zip
 ```
 
 Teams → **Apps** → **Manage your apps** → **Upload an app** → *Upload a custom app*. Your tenant must allow
 custom app upload. Add the app for yourself (personal scope), then send it any message, and select
 **Call downstream API** on the card.
 
-The manifest's `webApplicationInfo` is generated from `CLIENT_ID` / `BOT_APP_ID_URI`:
+The manifest's `webApplicationInfo` is generated from the bot ID (and an optional App ID URI argument):
 
 ```json
 "webApplicationInfo": { "id": "<bot ID>", "resource": "api://botid-<bot ID>" }
