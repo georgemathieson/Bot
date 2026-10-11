@@ -2,7 +2,7 @@
 
 This proof of concept (POC) shows one flow. A user clicks a button on an Adaptive Card in Microsoft Teams. Then the bot sends a request to a different service, as that user. The service has its own Microsoft Entra ID app registration. The bot uses the OAuth 2.0 on-behalf-of (OBO) flow. The user does not see a sign-in window or an MFA prompt.
 
-This documentation uses ASD-STE100 Simplified Technical English.
+This documentation uses ASD-STE100 Simplified Technical English. Footnotes give the Microsoft source of each claim. A dagger (†) marks a source that only a search summary confirms.
 
 - **Bot:** C# and .NET 10, with the [Teams SDK for .NET](https://github.com/microsoft/teams.net) (`Microsoft.Teams.Apps` 2.1.1)
 - **OBO:** [MSAL.NET](https://github.com/AzureAD/microsoft-authentication-library-for-dotnet) (`AcquireTokenOnBehalfOf`)
@@ -30,12 +30,12 @@ A bot does not get a user access token by default. These items are not usable fo
 
 | Item | What it is | Usable for OBO |
 | --- | --- | --- |
-| The `Authorization: Bearer` header of a request to `/api/messages` | A service token from the Bot Connector. `iss` is `https://api.botframework.com` and `aud` is the bot ID. It identifies the Bot Connector, not the user. | No |
+| The `Authorization: Bearer` header of a request to `/api/messages` | A service token from the Bot Connector. `iss` is `https://api.botframework.com` and `aud` is the bot ID.[^sdk-issuer] It identifies the Bot Connector, not the user.[^connector-auth] | No |
 | `activity.from` (`name`, `aadObjectId`) | Data about the user. It is not a token. | No |
-| A token with `name` and `preferred_username`, but no `scp` claim | Usually an ID token. It identifies the user to a client app. It does not give access to an API. | No |
-| The SSO token that this POC gets: `aud` is the bot, `scp` is `access_as_user`, `azp` is a Teams client ID | An access token for the bot API. Entra ID gives it to the Teams client for this user. | Yes. This token is the OBO assertion. |
+| A token with `name` and `preferred_username`, but no `scp` claim | Usually an ID token. It identifies the user to a client app. It does not give access to an API. Only a user access token has `scp`.[^claims] | No |
+| The SSO token that this POC gets: `aud` is the bot, `scp` is `access_as_user`, `azp` is a Teams client ID | An access token for the bot API. Entra ID gives it to the Teams client for this user.[^ua-handle] | Yes. This token is the OBO assertion.[^obo-request] |
 
-The bot must ask the Teams client for the SSO token. For Adaptive Cards, the bot uses the SSO steps of Universal Actions (`Action.Execute`). Microsoft gives the protocol in [Add code to enable SSO for Adaptive Cards Universal Actions](https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/universal-actions-for-adaptive-cards/sso-adaptive-cards-universal-action).
+The bot must ask the Teams client for the SSO token. For Adaptive Cards, the bot uses the SSO steps of Universal Actions (`Action.Execute`). Microsoft gives the protocol in its Universal Actions SSO documentation.[^ua-handle][^ua-receive]
 
 ## How it works
 
@@ -63,14 +63,15 @@ bot.OnAdaptiveCardAction((context, ct) =>
 
 Make sure that all of these conditions are true. If one condition is false, the user sees a consent dialog or a Sign in button.
 
-1. The bot app registration exposes the scope `access_as_user` at the Application ID URI `api://botid-<bot ID>`.
-2. The Teams client IDs have pre-authorization for this scope: `1fec8e78-bce4-4aaf-ab1b-5451cc387264` (desktop and mobile) and `5e3ce6c0-2b1f-4285-8d4b-75ee78787346` (web).
-3. In the manifest, `webApplicationInfo.id` is the bot ID. `webApplicationInfo.resource` is the Application ID URI.
-4. The bot app registration has the delegated permission `access_as_user` of the downstream API. An administrator gave admin consent.
-5. The Token Exchange URL of the OAuth connection on the Azure Bot is the Application ID URI.
-6. The user installed the app in the personal scope.
+1. The bot app registration exposes the scope `access_as_user` at the Application ID URI `api://botid-<bot ID>`.[^bot-uri]
+2. The Teams client IDs have pre-authorization for this scope: `1fec8e78-bce4-4aaf-ab1b-5451cc387264` (desktop and mobile) and `5e3ce6c0-2b1f-4285-8d4b-75ee78787346` (web).[^bot-clients]
+3. In the manifest, `webApplicationInfo.id` is the bot ID. `webApplicationInfo.resource` is the Application ID URI.[^bot-manifest]
+4. The bot app registration has the delegated permission `access_as_user` of the downstream API. An administrator gave admin consent.[^obo-admin]
+5. The Token Exchange URL of the OAuth connection on the Azure Bot is the Application ID URI.[^bot-oauth]
+6. The user installed the app in the personal scope.[^ua-handle]
+7. The card is in a one-on-one chat or a group chat. Microsoft does not support bot SSO in channels.[^bot-sso-scope]
 
-The SSO token comes from the current Teams session of the user. If the user did MFA to sign in to Teams, Entra ID keeps it in the OBO flow. A prompt occurs only if a Conditional Access policy of the downstream API asks for more. Then the bot shows the Sign in button.
+The SSO token comes from the current Teams session of the user. A Conditional Access policy of the downstream API can ask for MFA. If the user did not sign in with MFA, the OBO request fails.[^ca-obo] Then the bot shows the Sign in button. If the Teams sign-in used MFA, this POC expects no prompt. Microsoft does not state this case directly, so do a test with your policies.
 
 ## The two strategies (`Sso:TokenStrategy`)
 
@@ -85,14 +86,14 @@ The two strategies use the same Azure configuration. The Scopes setting of the O
 
 ## Which SDK to use
 
-- **TeamsFx SDK.** Microsoft gives only community support for this SDK. Do not use it for new work. Its `TeamsBotSsoPrompt` and `OnBehalfOfUserCredential` used the same pattern.
-- **Teams SDK.** Microsoft changed the name of the Teams AI library to Teams SDK. Microsoft recommends it for bots that operate only in Teams. This POC uses it (`Microsoft.Teams.Apps` for .NET).
-- **Microsoft 365 Agents SDK.** This SDK replaces the Bot Framework SDK. Use it if the same agent must also operate in Microsoft 365 Copilot or in other channels. The protocol is the same, so you can move `src/Bot/Sso/` to it.
+- **TeamsFx SDK.** Microsoft no longer supports this SDK. The Teams SDK and the Microsoft 365 Agents SDK replace it.[^legacy] Do not use it for new work. Its `TeamsBotSsoPrompt` and `OnBehalfOfUserCredential` used the same pattern.
+- **Teams SDK.** Microsoft changed the name of the Teams AI library to Teams SDK. It replaces the Bot Framework SDK for bots that operate only in Teams.[^legacy][^tools-sdks] This POC uses it (`Microsoft.Teams.Apps` for .NET).
+- **Microsoft 365 Agents SDK.** Use it if the same agent must also operate in Microsoft 365 Copilot or in other channels.[^tools-sdks] Microsoft no longer supports the Bot Framework SDK.[^legacy] The protocol is the same, so you can move `src/Bot/Sso/` to it.
 
 The Teams SDK gives the web host, the Bot Framework authentication, the activity routes and the token service client. The SSO steps for cards are in this POC, for two reasons:
 
-- The `OAuthFlow` class of the SDK supports OAuth cards only. It does not support the `loginRequest` of `Action.Execute`.
-- The `AdaptiveCardActionValue` class of the SDK does not contain `value.authentication`. For this reason, `CardActionTurn` reads the raw JSON of the invoke activity.
+- The `OAuthFlow` class of the SDK sends OAuth cards. It does not make the `loginRequest` of `Action.Execute`.[^sdk-oauthflow]
+- The `AdaptiveCardActionValue` class of the SDK does not contain `value.authentication`.[^sdk-value] For this reason, `CardActionTurn` reads the raw JSON of the invoke activity.
 
 ## Run the POC
 
@@ -167,9 +168,36 @@ scripts/                            Entra setup script (Azure CLI) and app packa
 
 ## Before you use this in production
 
-- **Secrets.** Do not use a client secret. Use a certificate, or a managed identity with a federated credential. MSAL.NET has `WithCertificate` and `WithClientAssertion`. The Teams SDK reads a managed identity from the `AzureAd` section.
-- **More than one instance.** With `Obo`, add a distributed token cache to MSAL.NET (`Microsoft.Identity.Web.TokenCache`). With `TokenService`, the cache is already external.
-- **Group chats and channels.** Microsoft documents `Action.Execute` sign-in for group chats and channels. Do a test of SSO in these conversations. The `OAuthFlow` class of the SDK does not use SSO in channels. For a different card view for each user, use `refresh` with `userIds`.
+- **Secrets.** Do not use a client secret. Use a certificate[^cert-creds], or a managed identity with a federated credential.[^fic] MSAL.NET has `WithCertificate` and `WithClientAssertion`. The Teams SDK reads a managed identity from the `AzureAd` section.[^sdk-mi]
+- **More than one instance.** With `Obo`, add a distributed token cache to MSAL.NET (`Microsoft.Identity.Web.TokenCache`).[^msal-cache] With `TokenService`, the cache is already external.
+- **Group chats and channels.** A bot can send a sign-in request from a card in a chat or a channel.[^ua-use-cases] But Microsoft does not support bot SSO in channels.[^bot-sso-scope] In a channel, the user sees the Sign in button. For a different card view for each user, use `refresh` with `userIds`.[^user-views]
 - **Diagnostics.** Set `Sso:ShowDiagnostics` to `false`. Do not write raw tokens to logs or cards. This code does not do this.
-- **Logs.** Do not use the `Trace` log level for `Microsoft.Teams`. At this level, the Teams SDK writes each invoke activity to the log, and the SSO token is in it.
-- **Your downstream service.** Validate tokens as `src/DownstreamApi` does. Examine the issuer, the audience and `scp`, and reject app-only tokens. Then authorize the request with `oid`, `scp` and the roles.
+- **Logs.** Do not use the `Trace` log level for `Microsoft.Teams`. At this level, the Teams SDK writes each invoke activity to the log, and the SSO token is in it.[^sdk-trace]
+- **Your downstream service.** Validate tokens as `src/DownstreamApi` does. Examine the issuer, the audience and `scp`, and reject app-only tokens.[^tokens-validate][^miw-scopes] Then authorize the request with `oid`, `scp` and the roles.
+
+[^sdk-issuer]: [Teams SDK for .NET source: BotConfig.cs, lines 23 to 27](https://github.com/microsoft/teams.net/blob/v2.1.1/src/Microsoft.Teams.Core/Hosting/BotConfig.cs#L23-L27). The default issuer is `https://api.botframework.com`.
+[^connector-auth]: [Authentication with the Bot Connector API](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication) †. The bot must validate the token from the Bot Connector.
+[^claims]: [Access token claims reference: Payload claims](https://learn.microsoft.com/entra/identity-platform/access-token-claims-reference#payload-claims). `scp` is "Only included for user tokens".
+[^ua-handle]: [Add code to enable SSO for Adaptive Cards Universal Actions: Add code to handle an access token](https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/universal-actions-for-adaptive-cards/sso-adaptive-cards-universal-action#add-code-to-handle-an-access-token). The 401 `loginRequest` with `tokenExchangeResource`, and the install prompt for the personal scope.
+[^ua-receive]: [Add code to enable SSO for Adaptive Cards Universal Actions: Add code to receive the token](https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/universal-actions-for-adaptive-cards/sso-adaptive-cards-universal-action#add-code-to-receive-the-token).
+[^ua-use-cases]: [Enable SSO for Adaptive Cards Universal Actions: Use cases for enabling SSO](https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/universal-actions-for-adaptive-cards/enable-sso-for-your-adaptive-cards-universal-action#use-cases-for-enabling-sso).
+[^user-views]: [User Specific Views: User Specific Views for Adaptive Cards](https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/universal-actions-for-adaptive-cards/user-specific-views#user-specific-views-for-adaptive-cards).
+[^obo-request]: [Microsoft identity platform and OAuth 2.0 On-Behalf-Of flow: First case: Access token request with a shared secret](https://learn.microsoft.com/entra/identity-platform/v2-oauth2-on-behalf-of-flow#first-case-access-token-request-with-a-shared-secret).
+[^obo-admin]: [On-Behalf-Of flow: Admin consent](https://learn.microsoft.com/entra/identity-platform/v2-oauth2-on-behalf-of-flow#admin-consent).
+[^ca-obo]: [Developer guidance for Conditional Access: Scenario: App performing the on-behalf-of flow](https://learn.microsoft.com/entra/identity-platform/v2-conditional-access-dev-guide#scenario-app-performing-the-on-behalf-of-flow). The OBO request "fails since the user has not signed in with multifactor authentication".
+[^bot-uri]: [Configure your bot app in Microsoft Entra ID: To configure application ID URI](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-register-aad?tabs=botid#to-configure-application-id-uri).
+[^bot-clients]: [Configure your bot app in Microsoft Entra ID: To configure authorized client application](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-register-aad?tabs=botid#to-configure-authorized-client-application).
+[^bot-oauth]: [Configure your bot app in Microsoft Entra ID: To update OAuth connection](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-register-aad?tabs=botid#to-update-oauth-connection).
+[^bot-manifest]: [Update app manifest for SSO: webApplicationInfo property](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-manifest#webapplicationinfo-property).
+[^bot-sso-scope]: [Enable SSO for your bot app](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-overview). "SSO for a bot app in Teams is supported in one-on-one and group chat scope, and not supported in channel scope."
+[^legacy]: [Legacy Teams app and agent development frameworks](https://learn.microsoft.com/microsoftteams/platform/legacy-tools-sdks). "Teams AI Library is now Teams SDK." The Bot Framework SDK and TeamsFx are no longer supported.
+[^tools-sdks]: [Teams Platform tools and SDKs](https://learn.microsoft.com/microsoftteams/platform/concepts/build-and-test/tool-sdk-overview). The Teams SDK is the main toolkit. The Microsoft 365 Agents SDK is the multichannel alternative.
+[^sdk-oauthflow]: [Teams SDK for .NET source: OAuthFlow.cs, lines 207 to 216](https://github.com/microsoft/teams.net/blob/v2.1.1/src/Microsoft.Teams.Apps/OAuth/OAuthFlow.cs#L207-L216). `OAuthFlow` builds an `OAuthCard`.
+[^sdk-value]: [Teams SDK for .NET source: AdaptiveCardHandlers.Values.cs, lines 12 to 31](https://github.com/microsoft/teams.net/blob/v2.1.1/src/Microsoft.Teams.Apps/Handlers/AdaptiveCardHandlers.Values.cs#L12-L31).
+[^sdk-mi]: [Teams SDK for .NET source: BotConfig.cs, lines 94 to 96](https://github.com/microsoft/teams.net/blob/v2.1.1/src/Microsoft.Teams.Core/Hosting/BotConfig.cs#L94-L96). An `AzureAd` section without client credentials means a user-assigned managed identity.
+[^sdk-trace]: [Teams SDK for .NET source: Router.cs, line 188](https://github.com/microsoft/teams.net/blob/v2.1.1/src/Microsoft.Teams.Apps/Routing/Router.cs#L188).
+[^cert-creds]: [Microsoft identity platform application authentication certificate credentials](https://learn.microsoft.com/entra/identity-platform/certificate-credentials).
+[^fic]: [Configure an application to trust a managed identity](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity). Lets an app use a managed identity token instead of a secret.
+[^msal-cache]: [MSAL.NET: Token cache serialization](https://learn.microsoft.com/entra/msal/dotnet/how-to/token-cache-serialization) †. Recommends a distributed token cache for web apps and web APIs.
+[^tokens-validate]: [Access tokens in the Microsoft identity platform: Validate tokens](https://learn.microsoft.com/entra/identity-platform/access-tokens#validate-tokens).
+[^miw-scopes]: [Protected web API: Verify scopes and app roles: Verify scopes in APIs called on behalf of users](https://learn.microsoft.com/entra/identity-platform/scenario-protected-web-api-verification-scope-app-roles#verify-scopes-in-apis-called-on-behalf-of-users).
