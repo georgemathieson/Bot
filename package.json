@@ -1,0 +1,27 @@
+{
+  "name": "teams-sso-obo-poc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "POC: Teams bot Adaptive Card (Action.Execute) -> silent Teams SSO -> Entra on-behalf-of -> protected downstream API",
+  "workspaces": [
+    "bot",
+    "downstream-api"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run typecheck --workspaces && tsc -p tsconfig.json",
+    "test": "npm test --workspaces && npm run test:e2e",
+    "test:e2e": "vitest run --dir e2e",
+    "dev:api": "npm run dev -w downstream-api",
+    "dev:bot": "npm run dev -w bot",
+    "package:app": "node scripts/package-app.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3"
+  }
+}

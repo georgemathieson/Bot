@@ -1,0 +1,29 @@
+{
+  "name": "bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Teams bot: Adaptive Card Action.Execute -> silent Teams SSO -> Entra OBO -> downstream API",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@azure/msal-node": "^5.6.0",
+    "@microsoft/teams.api": "2.1.0",
+    "@microsoft/teams.apps": "2.1.0",
+    "@microsoft/teams.cards": "2.1.0",
+    "@microsoft/teams.common": "2.1.0",
+    "jose": "^6.2.12"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3"
+  }
+}
