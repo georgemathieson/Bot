@@ -26,10 +26,12 @@ public static class SsoAppCredential
 
         var credential = app.ClientCredentials.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c.SourceType))
             ?? throw new InvalidOperationException(
-                $"{app.Source}:ClientCredentials is empty, so the bot can't make the OBO request as {app.Source}:ClientId. " +
+                (app.Source == SsoAppOptions.BotSectionName
+                    ? $"{app.Source} has no client secret, so the bot can't make the OBO request as {app.Source}:ClientId. "
+                    : $"{app.Source}:ClientCredentials is empty, so the bot can't make the OBO request as {app.Source}:ClientId. ") +
                 (app.Source == SsoAppOptions.BotSectionName
                     ? "If the bot uses a user-assigned managed identity, set SsoApp:ClientId to the SSO app registration; " +
-                      "the bot's managed identity is then its credential."
+                      "the bot's managed identity is then its credential. On your computer, set AuthType ClientSecret and ClientSecret."
                     : "Add a SignedAssertionFromManagedIdentity or ClientSecret entry."));
 
         if (string.Equals(credential.SourceType, ClientCredentialOptions.SignedAssertionFromManagedIdentity, StringComparison.OrdinalIgnoreCase))

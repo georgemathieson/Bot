@@ -1,15 +1,22 @@
+using Microsoft.Agents.Hosting.AspNetCore;
 using Microsoft.Extensions.Options;
-using Microsoft.Teams.Apps;
 using TeamsSsoBot;
 using TeamsSsoBot.Sso;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Teams SDK: authenticates Bot Framework traffic on /api/messages and outbound calls with the "AzureAd" section,
-// the Azure Bot's identity. With no ClientCredentials there, the SDK uses the user-assigned managed identity whose
-// client ID is AzureAd:ClientId (Azure Bot type "User-Assigned Managed Identity"). With a ClientSecret, it uses an
-// app registration (for running on your computer).
-builder.Services.AddTeamsBotApplication();
+// Microsoft 365 Agents SDK. Outbound Bot Framework traffic uses Connections:ServiceConnection, the bot's identity:
+// in Azure a user-assigned managed identity (AuthType UserManagedIdentity), on your computer an app registration
+// with a client secret.
+builder.AddAgentDefaults();
+builder.AddAgent<SsoBot>();
+
+// Inbound: validate the Bot Connector's token on /api/messages. The SDK turns this off in the Development
+// environment unless forced; this bot forces it on everywhere (a local tunnel is public too). Only
+// TokenValidation:Enabled=false turns it off, for tests.
+builder.AddAgentAuthorization(
+    b => b.Services.AddAgentAspNetAuthentication(BotIdentity.TokenValidation(b.Configuration)),
+    forceEnable: builder.Configuration.GetValue("TokenValidation:Enabled", true));
 
 // Adaptive Card Action.Execute -> silent Teams SSO -> on-behalf-of.
 builder.Services.AddCardActionSso(builder.Configuration);
@@ -19,31 +26,16 @@ builder.Services.AddSingleton<CardActionHandlers>();
 
 var app = builder.Build();
 
-var bot = app.UseTeamsBotApplication(); // POST /api/messages
-var handlers = app.Services.GetRequiredService<CardActionHandlers>();
+app.UseAgents();
+app.MapDefaultAgentEndpoints(); // POST /api/messages
+
 var sso = app.Services.GetRequiredService<IOptions<SsoOptions>>().Value;
 var ssoApp = app.Services.GetRequiredService<IOptions<SsoAppOptions>>().Value;
-
-bot.OnInstall(async (context, ct) =>
-    await context.SendAsync(new MessageActivityInput().WithAdaptiveCardAttachment(Cards.Welcome()), ct));
-
-bot.OnMessage(async (context, ct) =>
-{
-    if (string.Equals(context.Activity.Text?.Trim(), "signout", StringComparison.OrdinalIgnoreCase))
-    {
-        // Only the token-service strategy and the sign-in fallback store tokens in the token store.
-        await context.Api.UserToken.SignOutAsync(context.Activity.From!.Id!, sso.OAuthConnectionName, context.Activity.ChannelId ?? "msteams", ct);
-        await context.SendAsync("Signed out: any token cached in the Bot Framework token store was removed.", ct);
-        return;
-    }
-    await context.SendAsync(new MessageActivityInput().WithAdaptiveCardAttachment(Cards.Welcome()), ct);
-});
-
-bot.OnAdaptiveCardAction((context, ct) => handlers.OnCardActionAsync(CardActionTurn.FromContext(context), ct));
-
+var bot = BotIdentity.From(app.Configuration);
 app.Logger.LogInformation(
-    "Bot ready on /api/messages (strategy: {Strategy}, OAuth connection: {Connection}, SSO resource: {Resource}, " +
-    "SSO app: {SsoAppClientId} from {SsoAppSource} with {SsoAppCredential})",
-    sso.TokenStrategy, sso.OAuthConnectionName, sso.BotAppIdUri, ssoApp.ClientId, ssoApp.Source, SsoAppCredential.Describe(ssoApp));
+    "Bot ready on /api/messages (bot identity: {BotAuthType} {BotClientId}, strategy: {Strategy}, OAuth connection: {Connection}, " +
+    "SSO resource: {Resource}, SSO app: {SsoAppClientId} from {SsoAppSource} with {SsoAppCredential})",
+    bot.AuthType, bot.ClientId, sso.TokenStrategy, sso.OAuthConnectionName, sso.BotAppIdUri,
+    ssoApp.ClientId, ssoApp.Source, SsoAppCredential.Describe(ssoApp));
 
 app.Run();

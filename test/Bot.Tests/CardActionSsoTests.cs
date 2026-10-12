@@ -1,8 +1,8 @@
-using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Agents.Core.Models;
+using Microsoft.Agents.Core.Serialization;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using Microsoft.Teams.Apps;
 using TeamsSsoBot.Sso;
 using TestSupport;
 
@@ -23,7 +23,7 @@ public sealed class CardActionSsoTests
         Options.Create(new SsoOptions { OAuthConnectionName = "sso", BotAppIdUri = TestTenant.BotAppIdUri }),
         NullLogger<CardActionSso>.Instance);
 
-    private Task<InvokeResponse> Handled(CardActionTurn turn, UserToken token, CancellationToken _)
+    private Task<AdaptiveCardInvokeResponse> Handled(CardActionTurn turn, UserToken token, CancellationToken _)
     {
         _handled.Add((turn, token));
         return Task.FromResult(CardActionResponses.Card(new { type = "AdaptiveCard" }));
@@ -32,8 +32,8 @@ public sealed class CardActionSsoTests
     private async Task<JsonNode> Run(CardActionTurn turn)
     {
         var response = await Sso().HandleAsync(turn, Handled, TestContext.Current.CancellationToken);
-        Assert.Equal(200, response.Status); // invoke responses always travel as HTTP 200; the body has the real status
-        return JsonSerializer.SerializeToNode(response.Body)!;
+        // As the Agents SDK writes it in the HTTP 200 body of the invoke (EndToEndTests covers the HTTP layer).
+        return JsonNode.Parse(ProtocolJsonSerializer.ToJson(response))!;
     }
 
     [Fact]
@@ -47,7 +47,7 @@ public sealed class CardActionSsoTests
         var card = body["value"]!;
         Assert.Equal("sso", (string)card["connectionName"]!);
         Assert.Equal("ter-1", (string)card["tokenExchangeResource"]!["id"]!);
-        Assert.Equal(TestTenant.BotAppIdUri, (string)card["tokenExchangeResource"]!["uri"]!); // no trailing slash
+        Assert.Equal(TestTenant.BotAppIdUri, (string)card["tokenExchangeResource"]!["uri"]!);
         Assert.Equal("aad-provider", (string)card["tokenExchangeResource"]!["providerId"]!);
         Assert.Equal("signin", (string)card["buttons"]![0]!["type"]!);
         Assert.Equal(FakeTokenService.SignInLink, (string)card["buttons"]![0]!["value"]!);

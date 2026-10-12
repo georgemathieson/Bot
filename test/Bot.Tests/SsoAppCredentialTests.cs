@@ -125,8 +125,9 @@ public sealed class SsoAppCredentialTests : IDisposable
 
     private static readonly Dictionary<string, string?> ManagedIdentityBot = new()
     {
-        ["AzureAd:TenantId"] = TestTenant.TenantId,
-        ["AzureAd:ClientId"] = TestTenant.BotClientId, // the managed identity; no ClientCredentials
+        ["Connections:ServiceConnection:Settings:AuthType"] = "UserManagedIdentity",
+        ["Connections:ServiceConnection:Settings:ClientId"] = TestTenant.BotClientId, // the bot's identity: the managed identity
+        ["Connections:ServiceConnection:Settings:TenantId"] = TestTenant.TenantId,
     };
 
     [Fact]
@@ -137,7 +138,7 @@ public sealed class SsoAppCredentialTests : IDisposable
 
         Assert.Equal("SsoApp", options.Source);
         Assert.Equal(TestTenant.SsoAppClientId, options.ClientId);
-        Assert.Equal(TestTenant.TenantId, options.TenantId); // from AzureAd: one tenant
+        Assert.Equal(TestTenant.TenantId, options.TenantId); // from the service connection: one tenant
         Assert.Equal("https://login.microsoftonline.com/", options.Instance);
         var credential = Assert.Single(options.ClientCredentials);
         Assert.Equal("SignedAssertionFromManagedIdentity", credential.SourceType);
@@ -178,14 +179,15 @@ public sealed class SsoAppCredentialTests : IDisposable
     {
         var options = Bind(new()
         {
-            ["AzureAd:TenantId"] = TestTenant.TenantId,
-            ["AzureAd:ClientId"] = TestTenant.SsoAppClientId,
-            ["AzureAd:ClientCredentials:0:SourceType"] = "ClientSecret",
-            ["AzureAd:ClientCredentials:0:ClientSecret"] = "s3cret",
+            ["Connections:ServiceConnection:Settings:AuthType"] = "ClientSecret",
+            ["Connections:ServiceConnection:Settings:ClientId"] = TestTenant.SsoAppClientId,
+            ["Connections:ServiceConnection:Settings:ClientSecret"] = "s3cret",
+            ["Connections:ServiceConnection:Settings:AuthorityEndpoint"] = "https://login.microsoftonline.com/" + TestTenant.TenantId,
             ["SsoApp:ClientId"] = "", // as shipped in appsettings.json
         });
 
-        Assert.Equal("AzureAd", options.Source);
+        Assert.Equal(BotIdentity.SectionName, options.Source);
+        Assert.Equal(TestTenant.TenantId, options.TenantId); // from AuthorityEndpoint
         Assert.Equal(TestTenant.SsoAppClientId, options.ClientId);
         Assert.Equal("s3cret", Assert.Single(options.ClientCredentials).ClientSecret);
     }
@@ -195,10 +197,10 @@ public sealed class SsoAppCredentialTests : IDisposable
     {
         var options = Bind(new()
         {
-            ["AzureAd:TenantId"] = TestTenant.TenantId,
-            ["AzureAd:ClientId"] = TestTenant.BotClientId,
-            ["AzureAd:ClientCredentials:0:SourceType"] = "ClientSecret",
-            ["AzureAd:ClientCredentials:0:ClientSecret"] = "bot-secret",
+            ["Connections:ServiceConnection:Settings:AuthType"] = "ClientSecret",
+            ["Connections:ServiceConnection:Settings:ClientId"] = TestTenant.BotClientId,
+            ["Connections:ServiceConnection:Settings:ClientSecret"] = "bot-secret",
+            ["Connections:ServiceConnection:Settings:TenantId"] = TestTenant.TenantId,
             ["SsoApp:ClientId"] = TestTenant.SsoAppClientId,
         });
 
@@ -227,6 +229,15 @@ public sealed class SsoAppCredentialTests : IDisposable
 
         Assert.Equal(TestTenant.BotAppIdUri, provider.GetRequiredService<IOptions<SsoOptions>>().Value.BotAppIdUri);
         Assert.Equal("api://botid-" + TestTenant.SsoAppClientId, TestTenant.BotAppIdUri);
+    }
+
+    [Fact]
+    public void Inbound_token_validation_defaults_to_the_bot_identity()
+    {
+        var options = BotIdentity.TokenValidation(new ConfigurationBuilder().AddInMemoryCollection(ManagedIdentityBot).Build());
+
+        Assert.Equal([TestTenant.BotClientId], options.Audiences); // the Bot Connector's token is for the bot
+        Assert.Equal(TestTenant.TenantId, options.TenantId);
     }
 
     public void Dispose()

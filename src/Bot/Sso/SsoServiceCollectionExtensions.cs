@@ -19,7 +19,8 @@ public static class SsoServiceCollectionExtensions
                 }
             });
 
-        services.AddSingleton<ITokenServiceClient, TokenServiceClient>();
+        services.AddSingleton<TokenServiceClient>();
+        services.AddSingleton<ITokenServiceClient>(sp => sp.GetRequiredService<TokenServiceClient>());
         services.AddSingleton<ISsoTokenValidator>(sp => new SsoTokenValidator(
             sp.GetRequiredService<IOptions<SsoAppOptions>>(),
             sp.GetRequiredService<IOptions<SsoOptions>>()));

@@ -1,4 +1,4 @@
-using Microsoft.Teams.Core;
+using Microsoft.Agents.Core.Models;
 using TeamsSsoBot.Sso;
 using TestSupport;
 
@@ -6,26 +6,26 @@ namespace Bot.Tests;
 
 internal static class Turns
 {
-    public static CardActionTurn Click(string verb = "callApi", CardActionAuthentication? authentication = null, string? state = null) =>
-        new("29:user-1", "msteams", TestTenant.UserOid, new CardActionInvokeValue
+    public static CardActionTurn Click(string verb = "callApi", TokenExchangeInvokeRequest? authentication = null, string? state = null) =>
+        new("29:user-1", "msteams", TestTenant.UserOid, new AdaptiveCardInvokeValue
         {
-            Action = new() { Type = "Action.Execute", Verb = verb, Data = new() { ["action"] = verb } },
+            Action = new() { Type = "Action.Execute", Verb = verb, Data = new { action = verb } },
             Authentication = authentication,
             State = state,
             Trigger = "manual",
         });
 
-    public static CardActionAuthentication Sso(string token) => new() { Id = "ter-1", ConnectionName = "sso", Token = token };
+    public static TokenExchangeInvokeRequest Sso(string token) => new() { Id = "ter-1", ConnectionName = "sso", Token = token };
 }
 
 internal sealed class FakeTokenService : ITokenServiceClient
 {
     public const string SignInLink = "https://token.botframework.com/api/oauth/signin?signin=abc";
 
-    public GetSignInResourceResult Resource { get; set; } = new()
+    public SignInResource Resource { get; set; } = new()
     {
         SignInLink = SignInLink,
-        TokenExchangeResource = new TokenExchangeResource { Id = "ter-1", Uri = new Uri(TestTenant.BotAppIdUri), ProviderId = "aad-provider" },
+        TokenExchangeResource = new TokenExchangeResource { Id = "ter-1", Uri = TestTenant.BotAppIdUri, ProviderId = "aad-provider" },
     };
 
     public Dictionary<string, string> TokensByMagicCode { get; } = [];
@@ -35,7 +35,7 @@ internal sealed class FakeTokenService : ITokenServiceClient
     public List<string?> GetUserTokenCodes { get; } = [];
     public List<string> ExchangedTokens { get; } = [];
 
-    public Task<GetSignInResourceResult> GetSignInResourceAsync(CardActionTurn turn, CancellationToken cancellationToken)
+    public Task<SignInResource> GetSignInResourceAsync(CardActionTurn turn, CancellationToken cancellationToken)
     {
         SignInResourceCalls++;
         return Task.FromResult(Resource);

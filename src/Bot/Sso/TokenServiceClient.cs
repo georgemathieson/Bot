@@ -1,6 +1,8 @@
-using System.Net;
+using Microsoft.Agents.Builder;
+using Microsoft.Agents.Builder.UserAuth.TokenService;
+using Microsoft.Agents.Core.Errors;
+using Microsoft.Agents.Core.Models;
 using Microsoft.Extensions.Options;
-using Microsoft.Teams.Core;
 
 namespace TeamsSsoBot.Sso;
 
@@ -11,7 +13,7 @@ namespace TeamsSsoBot.Sso;
 public interface ITokenServiceClient
 {
     /// <summary>Sign-in link (button fallback) + tokenExchangeResource (SSO) for the OAuth connection.</summary>
-    Task<GetSignInResourceResult> GetSignInResourceAsync(CardActionTurn turn, CancellationToken cancellationToken);
+    Task<SignInResource> GetSignInResourceAsync(CardActionTurn turn, CancellationToken cancellationToken);
 
     /// <summary>Token stored for the user, or redeem a sign-in magic code. Null when there is none.</summary>
     Task<string?> GetUserTokenAsync(CardActionTurn turn, string? magicCode, CancellationToken cancellationToken);
@@ -20,22 +22,27 @@ public interface ITokenServiceClient
     Task<string?> ExchangeTokenAsync(CardActionTurn turn, string ssoToken, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Backed by the Agents SDK's user token client for the turn. The SDK builds the sign-in state itself, including the
+/// bot's app ID (<c>MsAppId</c>), which makes the token service return a <c>tokenExchangeResource</c> for SSO.
+/// </summary>
 public sealed class TokenServiceClient(IOptions<SsoOptions> options) : ITokenServiceClient
 {
     private string ConnectionName => options.Value.OAuthConnectionName;
 
-    public Task<GetSignInResourceResult> GetSignInResourceAsync(CardActionTurn turn, CancellationToken cancellationToken) =>
-        Api(turn).GetSignInResourceAsync(BuildState(turn), cancellationToken: cancellationToken);
+    public Task<SignInResource> GetSignInResourceAsync(CardActionTurn turn, CancellationToken cancellationToken) =>
+        UserTokenClientWrapper.GetSignInResourceAsync(Context(turn), ConnectionName, cancellationToken);
 
     public async Task<string?> GetUserTokenAsync(CardActionTurn turn, string? magicCode, CancellationToken cancellationToken)
     {
         try
         {
-            // The SDK returns null on 404 (no token stored, or the magic code was not valid).
-            var result = await Api(turn).GetAsync(turn.UserId, ConnectionName, turn.ChannelId, magicCode, cancellationToken).ConfigureAwait(false);
+            // The SDK returns null on 404 (no token stored, or the magic code was not valid). Its parameter is not
+            // annotated as nullable, but a null magic code means "the stored token", as in the token service API.
+            var result = await UserTokenClientWrapper.GetUserTokenAsync(Context(turn), ConnectionName, magicCode!, cancellationToken).ConfigureAwait(false);
             return string.IsNullOrEmpty(result?.Token) ? null : result.Token;
         }
-        catch (HttpRequestException ex) when (magicCode is not null && ex.StatusCode == HttpStatusCode.BadRequest)
+        catch (ErrorResponseException) when (magicCode is not null)
         {
             // A malformed or expired magic code: let the user sign in again rather than failing the action.
             return null;
@@ -46,37 +53,22 @@ public sealed class TokenServiceClient(IOptions<SsoOptions> options) : ITokenSer
     {
         try
         {
-            var result = await Api(turn).ExchangeAsync(turn.UserId, ConnectionName, turn.ChannelId, ssoToken, cancellationToken).ConfigureAwait(false);
+            var result = await UserTokenClientWrapper.ExchangeTokenAsync(
+                Context(turn), ConnectionName, new TokenExchangeRequest { Token = ssoToken }, cancellationToken).ConfigureAwait(false);
             return string.IsNullOrEmpty(result?.Token) ? null : result.Token;
         }
-        catch (HttpRequestException ex) when (ex.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.NotFound or HttpStatusCode.PreconditionFailed)
+        catch (ErrorResponseException)
         {
-            // The service could not exchange (typically consent is missing): fall back to interactive sign-in.
+            // 400/412 and similar: the token service can't exchange this token without the user (consent is
+            // usually missing). The caller falls back to the Sign in button.
             return null;
         }
     }
 
-    private static Microsoft.Teams.Apps.Clients.UserTokenApiClient Api(CardActionTurn turn) =>
-        turn.TokenApi ?? throw new InvalidOperationException("CardActionTurn has no token service client; create it with CardActionTurn.FromContext.");
+    /// <summary>Removes the user's token for the OAuth connection from the token store.</summary>
+    public Task SignOutAsync(ITurnContext context, CancellationToken cancellationToken) =>
+        UserTokenClientWrapper.SignOutUserAsync(context, ConnectionName, cancellationToken);
 
-    private string BuildState(CardActionTurn turn)
-    {
-        // Same shape as the SDK's own OAuthFlow. MsAppId is what makes the token service include a
-        // tokenExchangeResource (SSO); the conversation routes the sign-in result back.
-        var state = new
-        {
-            ConnectionName,
-            Conversation = new
-            {
-                turn.ActivityId,
-                Bot = new { Id = turn.BotId },
-                turn.ChannelId,
-                Conversation = new { Id = turn.ConversationId },
-                turn.ServiceUrl,
-                User = new { Id = turn.UserId },
-            },
-            MsAppId = turn.AppId,
-        };
-        return Convert.ToBase64String(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(state));
-    }
+    private static ITurnContext Context(CardActionTurn turn) =>
+        turn.Context ?? throw new InvalidOperationException("CardActionTurn has no turn context; create it with CardActionTurn.FromContext.");
 }

@@ -1,6 +1,6 @@
+using Microsoft.Agents.Core.Models;
 using Microsoft.Extensions.Options;
 using Microsoft.Identity.Client;
-using Microsoft.Teams.Apps;
 using TeamsSsoBot.Sso;
 
 namespace TeamsSsoBot;
@@ -14,7 +14,7 @@ public sealed class CardActionHandlers(
 {
     private readonly bool _showDiagnostics = options.Value.ShowDiagnostics;
 
-    public async Task<InvokeResponse> OnCardActionAsync(CardActionTurn turn, CancellationToken cancellationToken)
+    public async Task<AdaptiveCardInvokeResponse> OnCardActionAsync(CardActionTurn turn, CancellationToken cancellationToken)
     {
         if (turn.Verb != Cards.CallApiVerb)
         {
@@ -33,7 +33,7 @@ public sealed class CardActionHandlers(
         }
     }
 
-    private async Task<InvokeResponse> CallDownstreamApiAsync(CardActionTurn turn, UserToken token, CancellationToken cancellationToken)
+    private async Task<AdaptiveCardInvokeResponse> CallDownstreamApiAsync(CardActionTurn turn, UserToken token, CancellationToken cancellationToken)
     {
         try
         {

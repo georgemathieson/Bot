@@ -14,7 +14,7 @@ using TestSupport;
 namespace Bot.Tests;
 
 /// <summary>
-/// End to end: the real bot (Teams SDK pipeline on POST /api/messages) + the real downstream API
+/// End to end: the real bot (Agents SDK pipeline on POST /api/messages) + the real downstream API
 /// (Microsoft.Identity.Web), with only the parts that live in Microsoft's cloud simulated:
 /// <list type="bullet">
 /// <item>Entra ID: a local signing key, and fake managed identity and token endpoints under the real MSAL code
@@ -182,11 +182,13 @@ public sealed class EndToEndTests : IDisposable
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
-            builder.UseSetting("AzureAd:TenantId", TestTenant.TenantId);
-            builder.UseSetting("AzureAd:ClientId", TestTenant.BotClientId); // the bot's identity: a managed identity, no ClientCredentials
+            // The bot's identity: a user-assigned managed identity (no outbound Bot Framework call happens in these tests).
+            builder.UseSetting("Connections:ServiceConnection:Settings:AuthType", "UserManagedIdentity");
+            builder.UseSetting("Connections:ServiceConnection:Settings:ClientId", TestTenant.BotClientId);
+            builder.UseSetting("Connections:ServiceConnection:Settings:TenantId", TestTenant.TenantId);
             builder.UseSetting("SsoApp:ClientId", TestTenant.SsoAppClientId); // its credential defaults to the bot's managed identity
             // No Bot Connector JWT in a local test.
-            builder.UseSetting("AzureAd:DangerouslyAllowUnauthenticatedRequests", "true");
+            builder.UseSetting("TokenValidation:Enabled", "false");
             builder.UseSetting("Sso:BotAppIdUri", "");
             builder.UseSetting("Sso:TokenStrategy", "Obo");
             builder.UseSetting("DownstreamApi:Url", "http://localhost/api/me");

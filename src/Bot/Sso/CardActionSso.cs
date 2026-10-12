@@ -1,5 +1,5 @@
+using Microsoft.Agents.Core.Models;
 using Microsoft.Extensions.Options;
-using Microsoft.Teams.Apps;
 
 namespace TeamsSsoBot.Sso;
 
@@ -9,7 +9,7 @@ namespace TeamsSsoBot.Sso;
 /// <param name="SsoClaims">Claims of the Teams SSO token, when this click went through SSO.</param>
 public sealed record UserToken(string AccessToken, UserTokenSource Source, SsoTokenClaims? SsoClaims = null);
 
-public delegate Task<InvokeResponse> AuthenticatedCardActionHandler(CardActionTurn turn, UserToken token, CancellationToken cancellationToken);
+public delegate Task<AdaptiveCardInvokeResponse> AuthenticatedCardActionHandler(CardActionTurn turn, UserToken token, CancellationToken cancellationToken);
 
 /// <summary>
 /// Runs an Adaptive Card <c>Action.Execute</c> handler with a token for the downstream API, obtained
@@ -36,7 +36,7 @@ public sealed class CardActionSso(
 {
     private readonly SsoOptions _options = options.Value;
 
-    public async Task<InvokeResponse> HandleAsync(CardActionTurn turn, AuthenticatedCardActionHandler handler, CancellationToken cancellationToken = default)
+    public async Task<AdaptiveCardInvokeResponse> HandleAsync(CardActionTurn turn, AuthenticatedCardActionHandler handler, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(turn);
         ArgumentNullException.ThrowIfNull(handler);
@@ -94,16 +94,15 @@ public sealed class CardActionSso(
         return await LoginRequestAsync(turn, withSso: true, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<InvokeResponse> LoginRequestAsync(CardActionTurn turn, bool withSso, CancellationToken cancellationToken)
+    private async Task<AdaptiveCardInvokeResponse> LoginRequestAsync(CardActionTurn turn, bool withSso, CancellationToken cancellationToken)
     {
         var resource = await tokenService.GetSignInResourceAsync(turn, cancellationToken).ConfigureAwait(false);
-        TokenExchangeResourceBody? exchangeResource = null;
+        TokenExchangeResource? exchangeResource = null;
 
         if (withSso)
         {
             var botAppIdUri = _options.BotAppIdUri!;
-            // OriginalString, not ToString(): ToString() would append a trailing slash to "api://botid-...".
-            var connectionUri = resource.TokenExchangeResource?.Uri?.OriginalString;
+            var connectionUri = resource.TokenExchangeResource?.Uri;
             if (string.IsNullOrEmpty(connectionUri))
             {
                 logger.LogWarning(
@@ -119,10 +118,12 @@ public sealed class CardActionSso(
                     connectionUri, botAppIdUri);
             }
 
-            exchangeResource = new TokenExchangeResourceBody(
-                resource.TokenExchangeResource?.Id ?? Guid.NewGuid().ToString(),
-                string.IsNullOrEmpty(connectionUri) ? botAppIdUri : connectionUri,
-                resource.TokenExchangeResource?.ProviderId);
+            exchangeResource = new TokenExchangeResource
+            {
+                Id = resource.TokenExchangeResource?.Id ?? Guid.NewGuid().ToString(),
+                Uri = string.IsNullOrEmpty(connectionUri) ? botAppIdUri : connectionUri,
+                ProviderId = resource.TokenExchangeResource?.ProviderId,
+            };
         }
 
         return CardActionResponses.LoginRequest(_options.OAuthConnectionName, resource.SignInLink, exchangeResource);
