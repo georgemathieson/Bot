@@ -153,12 +153,11 @@ fi
 # --- 5. Settings -------------------------------------------------------------------------------
 cat <<EOF
 
-Settings for the bot in Azure (App Service or Container Apps application settings). None of them is a secret:
+Settings for the bot in Azure (App Service or Container Apps application settings). None of them is a secret.
+The bot's identity is the managed identity (AzureAd); the SSO app uses that identity as its credential:
   AzureAd__TenantId=$TENANT_ID
   AzureAd__ClientId=$MI_CLIENT_ID
   SsoApp__ClientId=$SSO_APP_ID
-  SsoApp__ClientCredentials__0__SourceType=SignedAssertionFromManagedIdentity
-  SsoApp__ClientCredentials__0__ManagedIdentityClientId=$MI_CLIENT_ID
   DownstreamApi__Scopes__0=api://$API_APP_ID/access_as_user
   DownstreamApi__Url=https://<downstream-api-host>/api/me
 EOF

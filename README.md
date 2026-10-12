@@ -78,6 +78,7 @@ flowchart LR
 - The Teams SDK uses the managed identity for Bot Framework traffic. It does this when `AzureAd` has a `ClientId` and no `ClientCredentials`.[^sdk-uami-config][^sdk-mi]
 - A managed identity cannot expose an API scope. For this reason, Teams SSO uses a separate SSO app registration.[^uami-sso] The SSO token is for this app, so the OBO request must come from this app.[^obo-request]
 - The SSO app registration has a federated credential that trusts the managed identity.[^fic][^mi-fic] For the OBO request, the bot gets a managed identity token for `api://AzureADTokenExchange`. The bot sends this token as the client assertion of the SSO app. It does not send a secret.[^fic-msal]
+- The bot has one identity. You set it one time, in `AzureAd:ClientId`. In `SsoApp`, you set only the client ID of the SSO app registration.
 - On your computer, there is no managed identity.[^mi-overview] There, the bot uses the SSO app registration with a client secret. Read [docs/azure-setup.md](docs/azure-setup.md), step 7.
 
 The class [`SsoAppCredential`](src/Bot/Sso/SsoAppCredential.cs) adds the credential to MSAL.NET.
@@ -163,8 +164,8 @@ To remove the tokens from the Bot Framework token store, send `signout` to the b
 | --- | --- |
 | `AzureAd:TenantId`, `AzureAd:ClientId` | The identity of the Azure Bot. The Teams SDK uses it for Bot Framework traffic. In Azure, `ClientId` is the client ID of the managed identity, and `AzureAd` has no `ClientCredentials`. |
 | `AzureAd:ClientCredentials:0:SourceType`, `AzureAd:ClientCredentials:0:ClientSecret` | Only on your computer: `ClientSecret` and the secret of the SSO app registration. Keep the secret in user-secrets. |
-| `SsoApp:ClientId` | The SSO app registration. If it is empty, the bot uses the `AzureAd` app registration for SSO and OBO. |
-| `SsoApp:ClientCredentials:0:SourceType`, `SsoApp:ClientCredentials:0:ManagedIdentityClientId` | `SignedAssertionFromManagedIdentity` and the client ID of the managed identity. The optional `TokenExchangeUrl` is the audience of the managed identity token. The default is `api://AzureADTokenExchange`. |
+| `SsoApp:ClientId` | The SSO app registration. It is not a second identity of the bot. If it is empty, the bot uses the `AzureAd` app registration for SSO and OBO. |
+| `SsoApp:ClientCredentials` | Optional. If the bot is a managed identity, the default credential is that managed identity. Set it only to use a different credential, or to set `TokenExchangeUrl` for a sovereign cloud. The default `TokenExchangeUrl` is `api://AzureADTokenExchange`. |
 | `Sso:OAuthConnectionName` | The name of the OAuth connection on the Azure Bot. The default is `sso`. |
 | `Sso:BotAppIdUri` | The default is `api://botid-<SSO app ID>`. It must be the same as the SSO app registration, the manifest and the OAuth connection. |
 | `Sso:TokenStrategy` | `Obo` (default) or `TokenService` |

@@ -183,10 +183,8 @@ public sealed class EndToEndTests : IDisposable
         {
             builder.UseEnvironment("Testing");
             builder.UseSetting("AzureAd:TenantId", TestTenant.TenantId);
-            builder.UseSetting("AzureAd:ClientId", TestTenant.BotClientId); // the managed identity: no ClientCredentials
-            builder.UseSetting("SsoApp:ClientId", TestTenant.SsoAppClientId);
-            builder.UseSetting("SsoApp:ClientCredentials:0:SourceType", "SignedAssertionFromManagedIdentity");
-            builder.UseSetting("SsoApp:ClientCredentials:0:ManagedIdentityClientId", TestTenant.BotClientId);
+            builder.UseSetting("AzureAd:ClientId", TestTenant.BotClientId); // the bot's identity: a managed identity, no ClientCredentials
+            builder.UseSetting("SsoApp:ClientId", TestTenant.SsoAppClientId); // its credential defaults to the bot's managed identity
             // No Bot Connector JWT in a local test.
             builder.UseSetting("AzureAd:DangerouslyAllowUnauthenticatedRequests", "true");
             builder.UseSetting("Sso:BotAppIdUri", "");

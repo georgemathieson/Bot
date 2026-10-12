@@ -32,7 +32,7 @@ These values must be the same in all of their locations:
 
 | Value | Locations |
 | --- | --- |
-| `<bot ID>` | Managed identity, client ID. Azure Bot, Microsoft App ID. Manifest, `bots[0].botId`. Bot settings `AzureAd:ClientId` and `SsoApp:ClientCredentials:0:ManagedIdentityClientId`. |
+| `<bot ID>` | Managed identity, client ID. Azure Bot, Microsoft App ID. Manifest, `bots[0].botId`. Bot setting `AzureAd:ClientId`. |
 | `<SSO app ID>` | SSO app registration, client ID. Manifest, `webApplicationInfo.id`. OAuth connection, Client id. Bot setting `SsoApp:ClientId`. |
 | `api://botid-<SSO app ID>` | SSO app registration, Expose an API, Application ID URI. Manifest, `webApplicationInfo.resource`. OAuth connection, Token Exchange URL. Bot setting `Sso:BotAppIdUri` (default value). |
 | `api://<API ID>/access_as_user` | Downstream API app registration, scope. SSO app registration, API permissions. OAuth connection, Scopes. Bot setting `DownstreamApi:Scopes`. |
@@ -173,7 +173,7 @@ az ad app federated-credential create --id <SSO app object ID> --parameters cred
 
 CAUTION: Entra ID does not examine the issuer, subject and audience when you add the credential. An incorrect value shows only when the bot sends the OBO request.[^fic-values] A new credential can also take some minutes to become active. Until then, the OBO request fails with `AADSTS70021`.[^fic-propagate]
 
-The managed identity and the SSO app registration must be in the same tenant.[^fic-values] The audience is different in the sovereign clouds. For these clouds, set the audience in the credential and in `SsoApp:ClientCredentials:0:TokenExchangeUrl` to the same value.[^fic-values]
+The managed identity and the SSO app registration must be in the same tenant.[^fic-values] The audience is different in the sovereign clouds. For these clouds, set the audience in the credential and in `SsoApp:ClientCredentials:0:TokenExchangeUrl` to the same value.[^fic-values] Also set `SsoApp:ClientCredentials:0:SourceType` to `SignedAssertionFromManagedIdentity`.
 
 ### 3.6 Optional: add a client secret to run the bot on your computer
 
@@ -279,13 +279,11 @@ In application settings, a double underscore (`__`) replaces each colon (`:`) of
 | --- | --- |
 | `AzureAd__TenantId` | Your tenant ID |
 | `AzureAd__ClientId` | The bot ID. Do not set `ClientCredentials` in `AzureAd`. Then the Teams SDK uses the managed identity.[^sdk-uami-config] |
-| `SsoApp__ClientId` | The SSO app ID |
-| `SsoApp__ClientCredentials__0__SourceType` | `SignedAssertionFromManagedIdentity` |
-| `SsoApp__ClientCredentials__0__ManagedIdentityClientId` | The bot ID |
+| `SsoApp__ClientId` | The SSO app ID. The bot uses its managed identity (`AzureAd__ClientId`) as the credential of the SSO app. |
 | `DownstreamApi__Url` | The URL of the downstream API, for example `https://<API host>/api/me` |
 | `DownstreamApi__Scopes__0` | `api://<API ID>/access_as_user` |
 
-None of these settings is a secret. The setting names in `SsoApp:ClientCredentials` are the same as in Microsoft.Identity.Web.[^fic-miw]
+None of these settings is a secret. The bot identity is in one setting, `AzureAd__ClientId`. To override the credential of the SSO app, set `SsoApp:ClientCredentials`. Its setting names are the same as in Microsoft.Identity.Web.[^fic-miw]
 
 ## 7 Optional: run the bot on your computer
 

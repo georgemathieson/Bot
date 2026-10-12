@@ -431,7 +431,7 @@ For more than one bot instance, use a distributed token cache with MSAL.NET. Mic
 | Validates the SSO token | `src/Bot/Sso/SsoTokenValidator.cs` |
 | Sends the OBO request, or uses the token service | `src/Bot/Sso/DownstreamTokenStrategies.cs` |
 | Adds the credential of the SSO app: managed identity token or client secret | `src/Bot/Sso/SsoAppCredential.cs` |
-| Reads the `SsoApp` settings, or the `AzureAd` settings if `SsoApp:ClientId` is empty | `src/Bot/Sso/SsoOptions.cs` |
+| Reads the `SsoApp` settings, or the `AzureAd` settings if `SsoApp:ClientId` is empty. Uses the managed identity of the bot as the default credential of the SSO app. | `src/Bot/Sso/SsoOptions.cs` |
 | Calls the Bot Framework token service | `src/Bot/Sso/TokenServiceClient.cs` |
 | Validates the OBO token in the downstream API | `src/DownstreamApi/Program.cs` |
 | Tests each step with a test tenant | `test/Bot.Tests/EndToEndTests.cs` |

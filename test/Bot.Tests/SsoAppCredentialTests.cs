@@ -130,21 +130,47 @@ public sealed class SsoAppCredentialTests : IDisposable
     };
 
     [Fact]
-    public void With_a_managed_identity_bot_the_sso_app_comes_from_the_SsoApp_section()
+    public void The_bot_managed_identity_is_the_sso_app_credential_without_configuring_it_again()
     {
-        var options = Bind(new(ManagedIdentityBot)
-        {
-            ["SsoApp:ClientId"] = TestTenant.SsoAppClientId,
-            ["SsoApp:ClientCredentials:0:SourceType"] = "SignedAssertionFromManagedIdentity",
-            ["SsoApp:ClientCredentials:0:ManagedIdentityClientId"] = TestTenant.BotClientId,
-        });
+        // The whole bot configuration in Azure: the bot's identity once, and the SSO app registration's ID.
+        var options = Bind(new(ManagedIdentityBot) { ["SsoApp:ClientId"] = TestTenant.SsoAppClientId });
 
         Assert.Equal("SsoApp", options.Source);
         Assert.Equal(TestTenant.SsoAppClientId, options.ClientId);
         Assert.Equal(TestTenant.TenantId, options.TenantId); // from AzureAd: one tenant
         Assert.Equal("https://login.microsoftonline.com/", options.Instance);
         var credential = Assert.Single(options.ClientCredentials);
+        Assert.Equal("SignedAssertionFromManagedIdentity", credential.SourceType);
         Assert.Equal(TestTenant.BotClientId, credential.ManagedIdentityClientId);
+    }
+
+    [Fact]
+    public void A_managed_identity_credential_without_a_client_id_uses_the_bot_managed_identity()
+    {
+        var options = Bind(new(ManagedIdentityBot)
+        {
+            ["SsoApp:ClientId"] = TestTenant.SsoAppClientId,
+            ["SsoApp:ClientCredentials:0:SourceType"] = "SignedAssertionFromManagedIdentity",
+            ["SsoApp:ClientCredentials:0:TokenExchangeUrl"] = "api://AzureADTokenExchangeUSGov", // e.g. a sovereign cloud
+        });
+
+        var credential = Assert.Single(options.ClientCredentials);
+        Assert.Equal(TestTenant.BotClientId, credential.ManagedIdentityClientId);
+        Assert.Equal("api://AzureADTokenExchangeUSGov", credential.TokenExchangeUrl);
+    }
+
+    [Fact]
+    public void An_explicit_SsoApp_credential_overrides_the_default()
+    {
+        const string otherManagedIdentity = "77777777-7777-7777-7777-777777777777";
+        var options = Bind(new(ManagedIdentityBot)
+        {
+            ["SsoApp:ClientId"] = TestTenant.SsoAppClientId,
+            ["SsoApp:ClientCredentials:0:SourceType"] = "SignedAssertionFromManagedIdentity",
+            ["SsoApp:ClientCredentials:0:ManagedIdentityClientId"] = otherManagedIdentity,
+        });
+
+        Assert.Equal(otherManagedIdentity, Assert.Single(options.ClientCredentials).ManagedIdentityClientId);
     }
 
     [Fact]
@@ -156,10 +182,7 @@ public sealed class SsoAppCredentialTests : IDisposable
             ["AzureAd:ClientId"] = TestTenant.SsoAppClientId,
             ["AzureAd:ClientCredentials:0:SourceType"] = "ClientSecret",
             ["AzureAd:ClientCredentials:0:ClientSecret"] = "s3cret",
-            // appsettings.json ships an empty SsoApp entry; it must not leak into the single-app setup.
-            ["SsoApp:ClientId"] = "",
-            ["SsoApp:ClientCredentials:0:SourceType"] = "SignedAssertionFromManagedIdentity",
-            ["SsoApp:ClientCredentials:0:ManagedIdentityClientId"] = "",
+            ["SsoApp:ClientId"] = "", // as shipped in appsettings.json
         });
 
         Assert.Equal("AzureAd", options.Source);
@@ -190,7 +213,7 @@ public sealed class SsoAppCredentialTests : IDisposable
         var options = Bind(new(ManagedIdentityBot));
 
         var ex = Assert.Throws<InvalidOperationException>(() => new MsalOboTokenAcquirer(Options.Create(options)));
-        Assert.Contains("set SsoApp:ClientId and SsoApp:ClientCredentials", ex.Message);
+        Assert.Contains("set SsoApp:ClientId to the SSO app registration", ex.Message);
     }
 
     [Fact]

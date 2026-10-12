@@ -36,9 +36,10 @@ public sealed class SsoOptions
 /// The Entra app registration that Teams SSO targets (manifest <c>webApplicationInfo.id</c>) and that runs the
 /// on-behalf-of exchange. The SSO token's audience is this app, so the OBO request must come from this app.
 /// <para>
-/// With a user-assigned managed identity bot, the Azure Bot has no app registration of its own, so this is a
-/// separate app registration. It trusts the managed identity through a federated identity credential, so no
-/// secret is needed: <c>ClientCredentials</c> holds a <c>SignedAssertionFromManagedIdentity</c> entry.
+/// This is not a second identity of the bot. The bot's identity is the user-assigned managed identity in
+/// <c>AzureAd</c>. A managed identity can't expose an API scope, so Teams SSO needs an app registration; this app
+/// registration trusts the bot's managed identity through a federated identity credential, and by default the
+/// bot's managed identity is its credential (no secret, nothing configured twice).
 /// </para>
 /// <para>
 /// Bound by <see cref="Bind"/>: from <c>SsoApp</c>, or, when <c>SsoApp:ClientId</c> is empty, from the bot's own
@@ -62,16 +63,38 @@ public sealed class SsoAppOptions
     {
         var ssoApp = configuration.GetSection(SectionName);
         var bot = configuration.GetSection(BotSectionName);
-        var app = string.IsNullOrWhiteSpace(ssoApp["ClientId"]) ? bot : ssoApp;
+        var usesSsoApp = !string.IsNullOrWhiteSpace(ssoApp["ClientId"]);
+        var app = usesSsoApp ? ssoApp : bot;
 
         options.Source = app.Key;
         options.ClientId = app["ClientId"] ?? string.Empty;
         // ClientId and ClientCredentials always come from the same section: another app's credential can't work.
         options.ClientCredentials = app.GetSection("ClientCredentials").Get<List<ClientCredentialOptions>>() ?? [];
+
+        // The bot has one identity, in AzureAd. When it is a user-assigned managed identity (a ClientId and no
+        // ClientCredentials, the same rule the Teams SDK applies), that identity is also the SSO app's credential,
+        // so it is configured once. SsoApp:ClientCredentials is only needed to override this.
+        var botManagedIdentity = IsManagedIdentity(bot) ? bot["ClientId"] : null;
+        if (usesSsoApp && botManagedIdentity is not null)
+        {
+            if (options.ClientCredentials.Count == 0)
+            {
+                options.ClientCredentials = [new() { SourceType = ClientCredentialOptions.SignedAssertionFromManagedIdentity }];
+            }
+            foreach (var credential in options.ClientCredentials.Where(c =>
+                string.Equals(c.SourceType, ClientCredentialOptions.SignedAssertionFromManagedIdentity, StringComparison.OrdinalIgnoreCase)
+                && string.IsNullOrWhiteSpace(c.ManagedIdentityClientId)))
+            {
+                credential.ManagedIdentityClientId = botManagedIdentity;
+            }
+        }
         // The SSO app, the managed identity and the bot are in one tenant (federated credentials require it).
         options.TenantId = FirstValue(ssoApp["TenantId"], bot["TenantId"]) ?? string.Empty;
         options.Instance = FirstValue(ssoApp["Instance"], bot["Instance"]) ?? options.Instance;
     }
+
+    private static bool IsManagedIdentity(IConfigurationSection section) =>
+        !string.IsNullOrWhiteSpace(section["ClientId"]) && !section.GetSection("ClientCredentials").GetChildren().Any();
 
     private static string? FirstValue(params string?[] values) => values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
 }
