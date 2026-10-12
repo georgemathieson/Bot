@@ -20,8 +20,8 @@ public interface ISsoTokenValidator
 /// <summary>
 /// Validates the token Teams hands back after a silent SSO handshake.
 /// <para>
-/// It is a real Entra access token: issued to the Teams client (azp = Teams' client ID) for the bot's own
-/// API (aud = bot client ID or api://botid-...), with scp = access_as_user. It is the OBO assertion.
+/// It is a real Entra access token: issued to the Teams client (azp = Teams' client ID) for the SSO app's
+/// API (aud = SSO app client ID or api://botid-...), with scp = access_as_user. It is the OBO assertion.
 /// Beyond signature, issuer, audience and scope, we check it belongs to the user who clicked
 /// (oid == activity.from.aadObjectId), so a token can't be replayed on someone else's activity.
 /// </para>
@@ -35,11 +35,11 @@ public sealed class SsoTokenValidator : ISsoTokenValidator
     private readonly JsonWebTokenHandler _handler = new();
 
     public SsoTokenValidator(
-        IOptions<BotIdentityOptions> identity,
+        IOptions<SsoAppOptions> ssoApp,
         IOptions<SsoOptions> sso,
         IConfigurationManager<OpenIdConnectConfiguration>? metadata = null)
     {
-        var id = identity.Value;
+        var id = ssoApp.Value;
         var instance = id.Instance.TrimEnd('/');
         _tenantId = id.TenantId;
         _requiredScope = sso.Value.BotSsoScope;

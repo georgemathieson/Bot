@@ -34,7 +34,7 @@
   ],
   "validDomains": ["*.botframework.com"],
   "webApplicationInfo": {
-    "id": "${{BOT_ID}}",
+    "id": "${{SSO_APP_ID}}",
     "resource": "${{BOT_APP_ID_URI}}"
   }
 }

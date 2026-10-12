@@ -7,8 +7,6 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
-using Microsoft.Identity.Client;
-using Microsoft.IdentityModel.JsonWebTokens;
 using TeamsSsoBot;
 using TeamsSsoBot.Sso;
 using TestSupport;
@@ -19,7 +17,8 @@ namespace Bot.Tests;
 /// End to end: the real bot (Teams SDK pipeline on POST /api/messages) + the real downstream API
 /// (Microsoft.Identity.Web), with only the parts that live in Microsoft's cloud simulated:
 /// <list type="bullet">
-/// <item>Entra ID: a local signing key, and a fake OBO call that mints the downstream token.</item>
+/// <item>Entra ID: a local signing key, and fake managed identity and token endpoints under the real MSAL code
+/// (managed identity token, then OBO with that token as the SSO app's credential).</item>
 /// <item>Bot Framework token service: a stub returning a sign-in link + tokenExchangeResource.</item>
 /// <item>Teams client: this test, which re-sends the invoke with an SSO token after the 401.</item>
 /// </list>
@@ -30,13 +29,13 @@ public sealed class EndToEndTests : IDisposable
     private readonly DownstreamApiFactory _api;
     private readonly BotFactory _bot;
     private readonly HttpClient _client;
-    private readonly FakeEntraObo _obo;
+    private readonly FakeEntraHttp _entra;
 
     public EndToEndTests()
     {
         _api = new DownstreamApiFactory(_tenant);
-        _obo = new FakeEntraObo(_tenant);
-        _bot = new BotFactory(_tenant, _api, _obo);
+        _entra = new FakeEntraHttp(_tenant);
+        _bot = new BotFactory(_tenant, _api, _entra);
         _client = _bot.CreateClient();
     }
 
@@ -86,9 +85,14 @@ public sealed class EndToEndTests : IDisposable
 
         var body = await Invoke(Sso(ssoToken));
 
-        var call = Assert.Single(_obo.Calls);
-        Assert.Equal(ssoToken, call.Assertion);
-        Assert.Equal([TestTenant.ApiAppIdUri + "/access_as_user"], call.Scopes);
+        // The OBO request: by the SSO app, with the managed identity token as its credential.
+        var obo = Assert.Single(_entra.TokenRequests);
+        Assert.Equal(ssoToken, obo["assertion"]);
+        Assert.Equal(TestTenant.SsoAppClientId, obo["client_id"]);
+        Assert.Equal(FakeEntraHttp.ManagedIdentityToken, obo["client_assertion"]);
+        Assert.Contains(TestTenant.ApiAppIdUri + "/access_as_user", obo["scope"].Split(' '));
+        // MSAL caches the managed identity token for the whole process, so an earlier test may have fetched it.
+        Assert.All(_entra.ManagedIdentityRequests, mi => Assert.Equal(TestTenant.BotClientId, FakeEntraHttp.Query(mi, "client_id")));
 
         Assert.Equal(200, (int)body["statusCode"]!);
         Assert.Equal("application/vnd.microsoft.card.adaptive", (string)body["type"]!);
@@ -104,8 +108,8 @@ public sealed class EndToEndTests : IDisposable
             .Select(f => ((string)f!["title"]!, (string)f["value"]!))
             .ToList();
         Assert.Contains(("aud", TestTenant.ApiClientId), facts);
-        Assert.Contains(("azp/appid (caller)", TestTenant.BotClientId), facts);
-        Assert.Contains(("aud", TestTenant.BotClientId), facts);
+        Assert.Contains(("azp/appid (caller)", TestTenant.SsoAppClientId), facts);
+        Assert.Contains(("aud", TestTenant.SsoAppClientId), facts);
         Assert.Contains(("azp/appid (caller)", TestTenant.TeamsDesktopClientId + " (Teams desktop/mobile)"), facts);
     }
 
@@ -124,13 +128,13 @@ public sealed class EndToEndTests : IDisposable
         var body = await Invoke(Sso(_tenant.SsoToken(c => c["oid"] = TestTenant.OtherUserOid)));
 
         Assert.Equal(412, (int)body["statusCode"]!);
-        Assert.Empty(_obo.Calls);
+        Assert.Empty(_entra.TokenRequests);
     }
 
     [Fact]
     public async Task Falls_back_to_the_sign_in_button_when_Entra_says_consent_is_missing()
     {
-        _obo.NextError = new MsalUiRequiredException("invalid_grant", "AADSTS65001: The user or administrator has not consented to use the application");
+        _entra.NextError = ("invalid_grant", "AADSTS65001: The user or administrator has not consented to use the application");
 
         var body = await Invoke(Sso(_tenant.SsoToken()));
 
@@ -142,13 +146,16 @@ public sealed class EndToEndTests : IDisposable
     [Fact]
     public async Task Shows_an_error_card_with_the_Entra_error_for_configuration_problems()
     {
-        _obo.NextError = new MsalServiceException("invalid_client", "AADSTS7000215: Invalid client secret provided.");
+        // What Entra says when the SSO app has no federated credential for the managed identity (or it isn't replicated yet).
+        _entra.NextError = ("invalid_client", "AADSTS70021: No matching federated identity record found for presented assertion.");
 
         var body = await Invoke(Sso(_tenant.SsoToken()));
 
         Assert.Equal(200, (int)body["statusCode"]!);
         Assert.Equal("application/vnd.microsoft.card.adaptive", (string)body["type"]!);
-        Assert.Contains("invalid_client: AADSTS7000215: Invalid client secret provided.", body["value"]!.ToJsonString());
+        var text = body["value"]!.ToJsonString();
+        Assert.Contains("invalid_client", text);
+        Assert.Contains("AADSTS70021: No matching federated identity record found for presented assertion.", text);
     }
 
     [Fact]
@@ -165,51 +172,21 @@ public sealed class EndToEndTests : IDisposable
         _client.Dispose();
         _bot.Dispose();
         _api.Dispose();
+        _entra.Dispose();
         _tenant.Dispose();
     }
 
-    /// <summary>
-    /// Stand-in for Entra's /token endpoint (grant_type=jwt-bearer, requested_token_use=on_behalf_of): checks the
-    /// assertion was issued for the bot and returns a token for the downstream API carrying the same user, azp = bot.
-    /// </summary>
-    private sealed class FakeEntraObo(TestTenant tenant) : IOboTokenAcquirer
-    {
-        public List<(string Assertion, string[] Scopes)> Calls { get; } = [];
-        public Exception? NextError { get; set; }
-
-        public Task<string> AcquireTokenOnBehalfOfAsync(string assertion, IEnumerable<string> scopes, CancellationToken cancellationToken)
-        {
-            Calls.Add((assertion, scopes.ToArray()));
-            if (NextError is { } error)
-            {
-                NextError = null;
-                throw error;
-            }
-
-            var jwt = new JsonWebToken(assertion);
-            var aud = jwt.Audiences.Single();
-            if (aud != TestTenant.BotClientId && aud != TestTenant.BotAppIdUri)
-            {
-                throw new MsalServiceException("invalid_grant", "AADSTS50013: Assertion audience does not match the client");
-            }
-
-            return Task.FromResult(tenant.DownstreamToken(c =>
-            {
-                c["oid"] = jwt.GetPayloadValue<string>("oid");
-                c["name"] = jwt.GetPayloadValue<string>("name");
-            }));
-        }
-    }
-
-    private sealed class BotFactory(TestTenant tenant, DownstreamApiFactory api, FakeEntraObo obo) : WebApplicationFactory<CardActionSso>
+    /// <summary>The bot as deployed to Azure: a user-assigned managed identity bot and a separate SSO app registration.</summary>
+    private sealed class BotFactory(TestTenant tenant, DownstreamApiFactory api, FakeEntraHttp entra) : WebApplicationFactory<CardActionSso>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
             builder.UseSetting("AzureAd:TenantId", TestTenant.TenantId);
-            builder.UseSetting("AzureAd:ClientId", TestTenant.BotClientId);
-            builder.UseSetting("AzureAd:ClientCredentials:0:SourceType", "ClientSecret");
-            builder.UseSetting("AzureAd:ClientCredentials:0:ClientSecret", "not-used");
+            builder.UseSetting("AzureAd:ClientId", TestTenant.BotClientId); // the managed identity: no ClientCredentials
+            builder.UseSetting("SsoApp:ClientId", TestTenant.SsoAppClientId);
+            builder.UseSetting("SsoApp:ClientCredentials:0:SourceType", "SignedAssertionFromManagedIdentity");
+            builder.UseSetting("SsoApp:ClientCredentials:0:ManagedIdentityClientId", TestTenant.BotClientId);
             // No Bot Connector JWT in a local test.
             builder.UseSetting("AzureAd:DangerouslyAllowUnauthenticatedRequests", "true");
             builder.UseSetting("Sso:BotAppIdUri", "");
@@ -221,11 +198,12 @@ public sealed class EndToEndTests : IDisposable
             {
                 services.RemoveAll<ITokenServiceClient>();
                 services.AddSingleton<ITokenServiceClient>(new FakeTokenService());
+                // The real MSAL acquirer; only its HTTP calls (managed identity endpoint, Entra) are simulated.
                 services.RemoveAll<IOboTokenAcquirer>();
-                services.AddSingleton<IOboTokenAcquirer>(obo);
+                services.AddSingleton<IOboTokenAcquirer>(sp => new MsalOboTokenAcquirer(sp.GetRequiredService<IOptions<SsoAppOptions>>(), entra));
                 services.RemoveAll<ISsoTokenValidator>();
                 services.AddSingleton<ISsoTokenValidator>(sp => new SsoTokenValidator(
-                    sp.GetRequiredService<IOptions<BotIdentityOptions>>(),
+                    sp.GetRequiredService<IOptions<SsoAppOptions>>(),
                     sp.GetRequiredService<IOptions<SsoOptions>>(),
                     tenant.ConfigurationManager));
                 // The bot reaches the in-process downstream API.

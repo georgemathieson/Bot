@@ -14,7 +14,7 @@ public sealed class SsoTokenValidatorTests : IDisposable
     public SsoTokenValidatorTests()
     {
         _validator = new SsoTokenValidator(
-            Options.Create(new BotIdentityOptions { TenantId = TestTenant.TenantId, ClientId = TestTenant.BotClientId }),
+            Options.Create(new SsoAppOptions { TenantId = TestTenant.TenantId, ClientId = TestTenant.SsoAppClientId }),
             Options.Create(new SsoOptions { BotAppIdUri = TestTenant.BotAppIdUri, BotSsoScope = "access_as_user" }),
             _tenant.ConfigurationManager);
     }
@@ -27,7 +27,7 @@ public sealed class SsoTokenValidatorTests : IDisposable
     {
         var claims = await Validate(_tenant.SsoToken());
 
-        Assert.Equal(TestTenant.BotClientId, claims.Audience);
+        Assert.Equal(TestTenant.SsoAppClientId, claims.Audience);
         Assert.Equal("access_as_user", claims.Scope);
         Assert.Equal(TestTenant.TeamsDesktopClientId, claims.AuthorizedParty);
         Assert.Equal(TestTenant.UserOid, claims.ObjectId);
@@ -88,7 +88,7 @@ public sealed class SsoTokenValidatorTests : IDisposable
         using var rotated = new TestTenant(keyId: "rotated-key"); // a key the validator's cached metadata doesn't have yet
         var metadata = new RotatingConfigurationManager(_tenant.Configuration, rotated.Configuration);
         var validator = new SsoTokenValidator(
-            Options.Create(new BotIdentityOptions { TenantId = TestTenant.TenantId, ClientId = TestTenant.BotClientId }),
+            Options.Create(new SsoAppOptions { TenantId = TestTenant.TenantId, ClientId = TestTenant.SsoAppClientId }),
             Options.Create(new SsoOptions { BotAppIdUri = TestTenant.BotAppIdUri }),
             metadata);
 

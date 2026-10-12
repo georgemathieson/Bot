@@ -13,10 +13,13 @@ public sealed class TestTenant : IDisposable
 {
     public const string TenantId = "11111111-1111-1111-1111-111111111111";
     public const string ApiClientId = "22222222-2222-2222-2222-222222222222";
+    /// <summary>The Azure Bot's Microsoft App ID: the client ID of its user-assigned managed identity.</summary>
     public const string BotClientId = "33333333-3333-3333-3333-333333333333";
+    /// <summary>The SSO app registration (webApplicationInfo.id): the SSO token's audience and the OBO caller.</summary>
+    public const string SsoAppClientId = "66666666-6666-6666-6666-666666666666";
     public const string UserOid = "44444444-4444-4444-4444-444444444444";
     public const string OtherUserOid = "55555555-5555-5555-5555-555555555555";
-    public const string BotAppIdUri = "api://botid-" + BotClientId;
+    public const string BotAppIdUri = "api://botid-" + SsoAppClientId;
     public const string ApiAppIdUri = "api://" + ApiClientId;
     public const string TeamsDesktopClientId = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
     public const string V2Issuer = "https://login.microsoftonline.com/" + TenantId + "/v2.0";
@@ -41,20 +44,20 @@ public sealed class TestTenant : IDisposable
     public IConfigurationManager<OpenIdConnectConfiguration> ConfigurationManager =>
         new StaticConfigurationManager<OpenIdConnectConfiguration>(Configuration);
 
-    /// <summary>What Teams hands the bot after silent SSO: issued to the Teams client, for the bot's API.</summary>
+    /// <summary>What Teams hands the bot after silent SSO: issued to the Teams client, for the SSO app's API.</summary>
     public string SsoToken(Action<Dictionary<string, object>>? customize = null) =>
         Mint(new()
         {
-            ["aud"] = BotClientId,
+            ["aud"] = SsoAppClientId,
             ["azp"] = TeamsDesktopClientId,
         }, customize);
 
-    /// <summary>What on-behalf-of returns: issued to the bot, for the downstream API.</summary>
+    /// <summary>What on-behalf-of returns: issued to the SSO app, for the downstream API.</summary>
     public string DownstreamToken(Action<Dictionary<string, object>>? customize = null) =>
         Mint(new()
         {
             ["aud"] = ApiClientId,
-            ["azp"] = BotClientId,
+            ["azp"] = SsoAppClientId,
         }, customize);
 
     /// <summary>Signs arbitrary claims. Set "exp" (unix seconds) to control expiry.</summary>

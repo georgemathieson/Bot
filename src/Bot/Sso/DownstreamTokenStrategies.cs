@@ -19,7 +19,7 @@ public sealed class InteractionRequiredException(string message, string? claims 
     public string? Claims { get; } = claims;
 }
 
-/// <summary>Turns the Teams SSO token (aud = the bot) into a token for the downstream API (aud = the API).</summary>
+/// <summary>Turns the Teams SSO token (aud = the SSO app) into a token for the downstream API (aud = the API).</summary>
 public interface IDownstreamTokenStrategy
 {
     /// <summary>A downstream token that is already available without asking Teams for SSO, if any.</summary>
@@ -39,28 +39,33 @@ public interface IOboTokenAcquirer
 }
 
 /// <summary>
-/// MSAL.NET implementation of the OAuth 2.0 on-behalf-of grant:
+/// MSAL.NET implementation of the OAuth 2.0 on-behalf-of grant, made by the SSO app registration:
 /// <code>
 /// POST https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token
 ///   grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer  requested_token_use=on_behalf_of
-///   assertion=&lt;Teams SSO token&gt;  client_id=&lt;bot&gt;  client_secret=&lt;bot secret&gt;  scope=&lt;downstream scopes&gt;
+///   assertion=&lt;Teams SSO token&gt;  client_id=&lt;SSO app&gt;  scope=&lt;downstream scopes&gt;
+///   client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+///   client_assertion=&lt;managed identity token for api://AzureADTokenExchange&gt;
 /// </code>
-/// Register as a singleton: MSAL's in-memory cache is keyed by the assertion, so repeated clicks carrying
-/// the same (still valid) SSO token don't hit Entra again. For several instances, add a distributed cache.
+/// (or <c>client_secret</c> when the bot runs on your computer). Register as a singleton: MSAL's in-memory cache is
+/// keyed by the assertion, so repeated clicks carrying the same (still valid) SSO token don't hit Entra again.
+/// For several instances, add a distributed cache.
 /// </summary>
 public sealed class MsalOboTokenAcquirer : IOboTokenAcquirer
 {
     private readonly IConfidentialClientApplication _msal;
 
-    public MsalOboTokenAcquirer(IOptions<BotIdentityOptions> identity)
+    public MsalOboTokenAcquirer(IOptions<SsoAppOptions> ssoApp, IMsalHttpClientFactory? httpClientFactory = null)
     {
-        var id = identity.Value;
-        _msal = ConfidentialClientApplicationBuilder.Create(id.ClientId)
-            .WithAuthority($"{id.Instance.TrimEnd('/')}/{id.TenantId}")
-            // For production prefer .WithCertificate(...) or .WithClientAssertion(...) with a managed identity.
-            .WithClientSecret(id.ClientSecret ?? throw new InvalidOperationException(
-                "AzureAd:ClientCredentials has no ClientSecret; the OBO call needs the bot's credential."))
-            .Build();
+        var app = ssoApp.Value;
+        var builder = ConfidentialClientApplicationBuilder.Create(app.ClientId)
+            .WithAuthority($"{app.Instance.TrimEnd('/')}/{app.TenantId}")
+            .WithSsoAppCredential(app, httpClientFactory);
+        if (httpClientFactory is not null)
+        {
+            builder.WithHttpClientFactory(httpClientFactory);
+        }
+        _msal = builder.Build();
     }
 
     public async Task<string> AcquireTokenOnBehalfOfAsync(string assertion, IEnumerable<string> scopes, CancellationToken cancellationToken)
@@ -113,8 +118,8 @@ public sealed class OboTokenStrategy(IOboTokenAcquirer acquirer, IOptions<Downst
 
 /// <summary>
 /// Option B: the Bot Framework token service runs the OBO exchange with the Azure Bot's OAuth connection
-/// (its client ID/secret, Token Exchange URL and Scopes), then stores and refreshes the token, so later
-/// clicks skip the SSO round trip.
+/// (the SSO app's client ID and credential, Token Exchange URL and Scopes), then stores and refreshes the token,
+/// so later clicks skip the SSO round trip.
 /// </summary>
 public sealed class TokenServiceTokenStrategy(ITokenServiceClient tokenService) : IDownstreamTokenStrategy
 {

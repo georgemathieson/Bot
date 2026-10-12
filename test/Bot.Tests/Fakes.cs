@@ -71,7 +71,7 @@ internal sealed class FakeStrategy : IDownstreamTokenStrategy
 
 internal sealed class FakeValidator : ISsoTokenValidator
 {
-    public static readonly SsoTokenClaims Claims = new(TestTenant.BotClientId, "access_as_user", TestTenant.TeamsDesktopClientId, TestTenant.UserOid, "2.0");
+    public static readonly SsoTokenClaims Claims = new(TestTenant.SsoAppClientId, "access_as_user", TestTenant.TeamsDesktopClientId, TestTenant.UserOid, "2.0");
 
     public string? RejectWith { get; set; }
     public List<(string Token, string? Oid)> Calls { get; } = [];

@@ -39,7 +39,7 @@ public sealed class MeEndpointTests : IDisposable
         Assert.Equal(TestTenant.UserOid, me.User.Oid);
         Assert.Equal(TestTenant.ApiClientId, me.Token.Aud);
         Assert.Equal("access_as_user", me.Token.Scp);
-        Assert.Equal(TestTenant.BotClientId, me.Token.CallingAppId); // the OBO caller
+        Assert.Equal(TestTenant.SsoAppClientId, me.Token.CallingAppId); // the OBO caller
     }
 
     [Fact]
@@ -50,7 +50,7 @@ public sealed class MeEndpointTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var me = await response.Content.ReadFromJsonAsync<MeResponse>(TestContext.Current.CancellationToken);
         Assert.Equal("adele@contoso.com", me!.User.Username);
-        Assert.Equal(TestTenant.BotClientId, me.Token.CallingAppId);
+        Assert.Equal(TestTenant.SsoAppClientId, me.Token.CallingAppId);
     }
 
     [Fact]
