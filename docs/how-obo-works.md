@@ -14,10 +14,12 @@ Read this document before you change the code in `src/Bot/Sso/`.
 
 The bot cannot get a user token directly from Microsoft Entra ID. Only the Teams client has a session for the user. The bot asks the Teams client for a token, and the Teams client gets it from Entra ID.[^ua-runtime] The flow has two parts:
 
-1. The bot asks the Teams client for a token. The Teams client gets this token from Entra ID without a prompt. This token is the SSO token. The SSO token is for the bot only.[^ua-handle]
+1. The bot asks the Teams client for a token. The Teams client gets this token from Entra ID without a prompt. This token is the SSO token. The SSO token is only for the SSO app registration of the bot.[^ua-handle][^uami-sso]
 2. The bot sends the SSO token to Entra ID and asks for a token for the downstream API. This step is the on-behalf-of (OBO) flow. Entra ID returns the OBO token.[^obo-protocol]
 
 The OBO token is for the downstream API. It identifies the same user as the SSO token. The bot sends the OBO token to the downstream API in the `Authorization` header.[^obo-protocol]
+
+The bot sends the OBO request as the SSO app registration. The credential is a token of the user-assigned managed identity of the bot, not a secret.[^mi-fic][^fic-msal]
 
 ```mermaid
 flowchart LR
@@ -40,18 +42,21 @@ flowchart LR
 | Scope (`scp` claim) | The delegated permission in the token, for example `access_as_user`. Only a user token has this claim.[^claims] |
 | Authorized party (`azp` claim, `appid` in v1 tokens) | The app that asked Entra ID for the token.[^claims] |
 | Object ID (`oid` claim) | The ID of the user in Entra ID.[^claims] |
-| SSO token | The access token that the Teams client gets for the bot. The audience is the bot. The authorized party is the Teams client. |
-| OBO token | The access token that the bot gets for the downstream API. The audience is the downstream API. The authorized party is the bot. |
+| SSO token | The access token that the Teams client gets for the SSO app registration of the bot. The audience is the SSO app. The authorized party is the Teams client. |
+| OBO token | The access token that the bot gets for the downstream API, as the SSO app. The audience is the downstream API. The authorized party is the SSO app. |
 | Service token | The token in the `Authorization` header of each request from the Bot Connector to the bot. It identifies the Bot Connector. It does not identify the user.[^connector-auth] |
 | Assertion | The token that the bot sends in the OBO request. In this flow, the assertion is the SSO token.[^obo-request] |
-| Pre-authorization | A setting in the bot app registration. It lets the Teams client get the SSO token without a consent prompt.[^consent-preauth] |
+| Pre-authorization | A setting in the SSO app registration. It lets the Teams client get the SSO token without a consent prompt.[^consent-preauth] |
 | Admin consent | A permission that an administrator gives for all users in the tenant. It lets the bot get the OBO token without a consent prompt.[^consent-admin] |
 | OAuth connection | A setting on the Azure Bot resource. The Bot Framework token service uses it for the sign-in link and for the token exchange.[^bot-oauth] |
+| Managed identity | An identity that Azure assigns to an Azure resource, for example the host of the bot. The resource gets tokens for the identity without a secret.[^mi-overview] |
+| Federated credential | A credential of an app registration that trusts the tokens of a different identity. Here, the SSO app registration trusts the managed identity.[^fic-values] |
+| Client assertion | A token that an app sends instead of a secret, to prove its identity. Here, it is a managed identity token.[^fic-msal][^obo-cert] |
 | Magic code | A one-time code. The Teams client sends it to the bot in the `state` field after the user signs in with the Sign in button. Microsoft calls it the "authorization code" in this flow.[^ua-flow] |
 
 ## 4 Parts of the system
 
-Seven parts take part in the flow. Microsoft operates the Teams client, the Bot Connector, the Bot Framework token service and Entra ID. You operate the bot and the downstream API.
+Eight parts take part in the flow. Microsoft operates the Teams client, the Bot Connector, the Bot Framework token service, the managed identity endpoint and Entra ID. You operate the bot and the downstream API.
 
 ```mermaid
 flowchart TB
@@ -60,6 +65,7 @@ flowchart TB
         T["Teams client"]
         BC["Bot Connector"]
         TS["Bot Framework<br/>token service"]
+        MI["Managed identity<br/>endpoint"]
         E[("Microsoft Entra ID")]
     end
     subgraph YOU["Your Azure subscription"]
@@ -71,27 +77,31 @@ flowchart TB
     BC <-- "POST /api/messages<br/>(service token)" --> B
     B -- "Sign-in link and<br/>tokenExchangeResource" --> TS
     T -- "SSO token request" --> E
+    B -- "Managed identity token<br/>(the credential)" --> MI
     B -- "OBO request" --> E
     B -- "Request with the OBO token" --> A
 ```
 
-Three app identities take part in the flow:
+Four identities take part in the flow:
 
 | App | Client ID | Function in the flow |
 | --- | --- | --- |
 | Teams client | `1fec8e78-bce4-4aaf-ab1b-5451cc387264` (desktop and mobile), `5e3ce6c0-2b1f-4285-8d4b-75ee78787346` (web)[^bot-clients] | Microsoft owns these apps. The Teams client asks Entra ID for the SSO token. |
-| Bot app registration | Your bot ID | It exposes the scope `api://botid-<bot ID>/access_as_user`.[^bot-uri] The bot uses its client secret to ask for the OBO token. |
+| User-assigned managed identity | Your bot ID | The identity of the Azure Bot. The Teams SDK uses it for Bot Framework traffic.[^sdk-uami-config] It is also the credential of the SSO app registration.[^mi-fic] |
+| SSO app registration | Your SSO app ID | It exposes the scope `api://botid-<SSO app ID>/access_as_user`.[^bot-uri] The bot asks for the OBO token as this app. A managed identity cannot expose a scope, so this app is necessary.[^uami-sso] |
 | Downstream API app registration | Your API ID | It exposes the scope `api://<API ID>/access_as_user`.[^expose-api] The downstream API accepts the OBO token. |
 
-Two permissions connect the three apps. Each permission removes one consent prompt.[^consent-preauth][^consent-admin]
+Two permissions and one federated credential connect the identities. Each permission removes one consent prompt.[^consent-preauth][^consent-admin] The federated credential removes the secret.[^mi-fic]
 
 ```mermaid
 flowchart LR
     TC["Teams client<br/>1fec8e78-… and 5e3ce6c0-…"]
-    BOT["Bot app registration<br/>api://botid-‹bot ID›"]
+    SSO["SSO app registration<br/>api://botid-‹SSO app ID›"]
     API["Downstream API app registration<br/>api://‹API ID›"]
-    TC -- "Pre-authorization for<br/>access_as_user" --> BOT
-    BOT -- "Delegated permission<br/>access_as_user<br/>+ admin consent" --> API
+    MI["User-assigned<br/>managed identity"]
+    TC -- "Pre-authorization for<br/>access_as_user" --> SSO
+    SSO -- "Delegated permission<br/>access_as_user<br/>+ admin consent" --> API
+    SSO -- "Federated credential<br/>trusts" --> MI
 ```
 
 ## 5 The three tokens
@@ -100,7 +110,7 @@ Each request from the Bot Connector to the bot has a service token. The bot must
 
 The user name in a request comes from `activity.from`. This field is not a token. The bot cannot use it to get a token.
 
-The OBO request must contain a user access token that has the audience of the bot.[^obo-request] The bot gets this SSO token from the Teams client. Then the bot uses the SSO token to get the OBO token.
+The OBO request must contain a user access token that has the audience of the app that sends the request.[^obo-request] Here, that app is the SSO app registration. The bot gets this SSO token from the Teams client. Then the bot uses the SSO token to get the OBO token.
 
 ```mermaid
 flowchart LR
@@ -108,10 +118,10 @@ flowchart LR
         s1["iss: api.botframework.com<br/>aud: ‹bot ID›<br/>no user claims"]
     end
     subgraph A["SSO token"]
-        a1["aud: ‹bot ID›<br/>azp: Teams client<br/>scp: access_as_user<br/>oid: the user"]
+        a1["aud: ‹SSO app ID›<br/>azp: Teams client<br/>scp: access_as_user<br/>oid: the user"]
     end
     subgraph B["OBO token"]
-        b1["aud: ‹API ID›<br/>azp: ‹bot ID›<br/>scp: access_as_user<br/>oid: the same user"]
+        b1["aud: ‹API ID›<br/>azp: ‹SSO app ID›<br/>scp: access_as_user<br/>oid: the same user"]
     end
     A -- "OBO request<br/>to Entra ID" --> B
     B -- "Authorization: Bearer" --> API["Downstream API"]
@@ -120,15 +130,15 @@ flowchart LR
 | Claim | Service token | SSO token | OBO token |
 | --- | --- | --- | --- |
 | `iss` | `https://api.botframework.com`[^sdk-issuer] | Entra ID, your tenant | Entra ID, your tenant |
-| `aud` | Bot ID | Bot ID (v2). In v1 tokens, the client ID or the resource URI, for example `api://botid-<bot ID>`.[^claims] | API ID (v2). In v1 tokens, the client ID or `api://<API ID>`.[^claims] |
-| `azp` or `appid` | None | Teams client ID | Bot ID |
+| `aud` | Bot ID | SSO app ID (v2). In v1 tokens, the client ID or the resource URI, for example `api://botid-<SSO app ID>`.[^claims] | API ID (v2). In v1 tokens, the client ID or `api://<API ID>`.[^claims] |
+| `azp` or `appid` | None | Teams client ID | SSO app ID |
 | `scp` | None | `access_as_user` | `access_as_user` |
 | `oid`, `tid`, `name` | None | The user | The same user |
 | Sender and receiver | Bot Connector to bot | Teams client to bot | Bot to downstream API |
 
 The token version comes from the `requestedAccessTokenVersion` setting of the API app registration. If the setting is empty, the version is 1.[^manifest-version] The setup in this POC sets it to 2.[^bot-version]
 
-CAUTION: Do not send the SSO token to the downstream API. An API must accept only tokens that have its own audience.[^tokens-validate] The audience of the SSO token is the bot.
+CAUTION: Do not send the SSO token to the downstream API. An API must accept only tokens that have its own audience.[^tokens-validate] The audience of the SSO token is the SSO app.
 
 ## 6 The full sequence
 
@@ -151,7 +161,7 @@ sequenceDiagram
     B->>TS: GetSignInResource (OAuth connection)
     TS-->>B: Sign-in link + tokenExchangeResource
     B-->>T: HTTP 200, body statusCode 401, loginRequest
-    T->>E: Token request for api://botid-‹bot ID›
+    T->>E: Token request for api://botid-‹SSO app ID›
     E-->>T: SSO token
     T->>B: Same invoke + value.authentication.token
     B->>B: Validate the SSO token
@@ -172,7 +182,7 @@ sequenceDiagram
 | 7 to 8 | The Teams client uses the `tokenExchangeResource` to get a token from Entra ID.[^ua-handle] It uses the current session of the user. Entra ID returns the SSO token. | Teams client |
 | 9 | The Teams client sends the same invoke activity again, through the Bot Connector. The SSO token is in `value.authentication.token`.[^ua-receive] The SDK type for this value does not contain `authentication`, so the bot reads the raw JSON.[^sdk-value][^sdk-raw] | `CardActionTurn.FromContext` |
 | 10 | The bot validates the SSO token. Section 12 gives the checks. | `SsoTokenValidator` |
-| 11 to 12 | The bot sends the OBO request to Entra ID. Entra ID returns the OBO token. Section 7 gives the details.[^obo-request] | `OboTokenStrategy`, `MsalOboTokenAcquirer` |
+| 11 to 12 | The bot sends the OBO request to Entra ID as the SSO app. A managed identity token is the credential. Entra ID returns the OBO token. Section 7 gives the details.[^obo-request] | `OboTokenStrategy`, `MsalOboTokenAcquirer`, `SsoAppCredential` |
 | 13 to 15 | The bot sends a request to the downstream API with the OBO token. The API validates the token and returns the user data.[^miw-validation] | `DownstreamApiClient`, `src/DownstreamApi/Program.cs` |
 | 16 | The bot returns a new card. The HTTP status is 200, and the body has `statusCode` 200. | `Cards.Result` |
 
@@ -180,7 +190,7 @@ NOTE: The bot does steps 4 to 9 on each click when `Sso:TokenStrategy` is `Obo`.
 
 ## 7 The OBO request
 
-The bot uses MSAL.NET for the OBO request.[^msal-obo] MSAL.NET sends this HTTP request to the token endpoint of Entra ID:[^obo-request]
+The bot uses MSAL.NET for the OBO request.[^msal-obo] The bot sends the request as the SSO app registration. First, MSAL.NET gets a token from the managed identity of the bot. The audience of this token is `api://AzureADTokenExchange`.[^fic-msal][^fic-values] Then MSAL.NET sends this HTTP request to the token endpoint of Entra ID:[^obo-request][^obo-cert]
 
 ```http
 POST https://login.microsoftonline.com/{tenant-id}/oauth2/v2.0/token
@@ -188,8 +198,9 @@ Content-Type: application/x-www-form-urlencoded
 
 grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer
 &requested_token_use=on_behalf_of
-&client_id={bot-id}
-&client_secret={bot-secret}
+&client_id={sso-app-id}
+&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+&client_assertion={managed identity token}
 &assertion={SSO token}
 &scope=api://{api-id}/access_as_user
 ```
@@ -198,38 +209,60 @@ grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer
 | --- | --- | --- |
 | `grant_type` | `urn:ietf:params:oauth:grant-type:jwt-bearer` | Identifies the request as a JWT bearer grant.[^obo-request] |
 | `requested_token_use` | `on_behalf_of` | Tells Entra ID to use the OBO flow.[^obo-request] |
-| `client_id`, `client_secret` | The bot app registration | Identifies the bot. The bot can use a certificate instead of a secret.[^obo-cert] |
-| `assertion` | The SSO token | The token that the bot received. Its audience must be the bot.[^obo-request] |
+| `client_id` | The SSO app registration | Identifies the app that sends the request. The audience of the SSO token must be this app.[^obo-request] |
+| `client_assertion_type`, `client_assertion` | The JWT bearer assertion type and the managed identity token | The credential of the SSO app. These two fields replace `client_secret`.[^obo-cert] Entra ID accepts the managed identity token because of the federated credential.[^fic-values] |
+| `assertion` | The SSO token | The token that the bot received. Its audience must be the SSO app.[^obo-request] |
 | `scope` | `api://<API ID>/access_as_user` | Identifies the downstream API and the delegated permission.[^obo-request] |
+
+On your computer, there is no managed identity.[^mi-overview] There, the request has `client_secret` instead of the two `client_assertion` fields.[^obo-request]
+
+NOTE: Microsoft gives OBO examples with a secret and with a certificate.[^obo-request][^obo-cert] Microsoft also states that a managed identity is a credential "just like certificate or password".[^mi-fic] This POC did not send this request to a real Entra ID. The tests send it to a simulated Entra ID.
 
 Entra ID examines the request before it returns a token. Microsoft does not document the sequence of these checks.
 
 ```mermaid
 sequenceDiagram
     participant B as Bot (MSAL.NET)
+    participant MI as Managed identity endpoint
     participant E as Entra ID token endpoint
-    B->>E: POST /oauth2/v2.0/token (jwt-bearer, assertion = SSO token)
-    Note over E: Credentials of the bot and the assertion
+    B->>MI: Token request for api://AzureADTokenExchange (if no cached token)
+    MI-->>B: Managed identity token
+    B->>E: POST /oauth2/v2.0/token (jwt-bearer, assertion = SSO token, client_assertion = managed identity token)
+    Note over E: Federated credential of the SSO app: issuer, subject, audience
     Note over E: Expiry time of the assertion
-    Note over E: Audience of the assertion = the bot?
-    Note over E: Consent: bot to downstream API, for this user
+    Note over E: Audience of the assertion = the SSO app?
+    Note over E: Consent: SSO app to downstream API, for this user
     Note over E: Conditional Access policies of the downstream API
     alt All checks are correct
-        E-->>B: 200 access_token = OBO token (aud = API, azp = bot)
+        E-->>B: 200 access_token = OBO token (aud = API, azp = SSO app)
     else Consent or MFA is necessary
         E-->>B: Error: AADSTS65001, or interaction_required with claims
     else The assertion or the configuration is incorrect
-        E-->>B: Error: for example AADSTS50013, AADSTS500133, AADSTS7000215
+        E-->>B: Error: for example AADSTS70021, AADSTS50013, AADSTS500133
     end
 ```
 
-- Entra ID validates the credentials of the bot and the assertion.[^obo-protocol] If the client secret is incorrect, Entra ID returns `AADSTS7000215`.[^errors]
+- Entra ID validates the credential of the SSO app and the assertion.[^obo-protocol] The issuer, subject and audience of the federated credential must agree with the managed identity token.[^fic-values] If no federated credential agrees, Entra ID returns `AADSTS70021`.[^fic-propagate]
+- On your computer, the credential is a client secret. If the secret is incorrect, Entra ID returns `AADSTS7000215`.[^errors]
 - If the expiry time of the assertion is in the past, Entra ID returns `AADSTS500133`.[^errors]
 - The audience of the assertion must be the app that sends the request.[^obo-request] If the assertion is not valid, Entra ID returns `AADSTS50013` (InvalidAssertion). The error reference gives several causes for this code.[^errors]
-- If there is no consent for the bot to use the downstream API, Entra ID returns `AADSTS65001`.[^errors]
+- If there is no consent for the SSO app to use the downstream API, Entra ID returns `AADSTS65001`.[^errors]
 - Entra ID applies the Conditional Access policies of the downstream API. If the user sign-in does not agree with a policy, Entra ID returns `interaction_required` and a claims challenge.[^obo-error]
 
+A managed identity token is valid for 24 hours. Microsoft recommends that an app keeps it in a cache.[^mi-cache] MSAL.NET keeps it in memory, so most OBO requests do not go to the managed identity endpoint.
+
 The OBO token is a user token for the same user as the SSO token.[^obo-protocol]
+
+A short form of the code in `src/Bot/Sso/SsoAppCredential.cs` adds the managed identity token as the credential:[^fic-msal]
+
+```csharp
+var miApp = ManagedIdentityApplicationBuilder
+    .Create(ManagedIdentityId.WithUserAssignedClientId(credential.ManagedIdentityClientId))
+    .Build();
+return builder.WithClientAssertion(async (AssertionRequestOptions options) =>
+    (await miApp.AcquireTokenForManagedIdentity("api://AzureADTokenExchange")
+        .ExecuteAsync(options.CancellationToken)).AccessToken);
+```
 
 This code in `src/Bot/Sso/DownstreamTokenStrategies.cs` sends the request:
 
@@ -241,7 +274,7 @@ return result.AccessToken;
 
 `AcquireTokenOnBehalfOf` examines the MSAL.NET token cache before it sends a request to Entra ID.[^msal-obo] The cache key of an OBO token is a hash of the assertion.[^msal-cache-key] If the Teams client sends the same SSO token again, MSAL.NET returns the cached OBO token.
 
-NOTE: For ASP.NET Core web APIs, Microsoft recommends Microsoft.Identity.Web for OBO.[^msal-obo] Microsoft.Identity.Web uses the bearer token that the web API received and validated.[^miw-obo] In a bot, that token is the service token, not the SSO token. For this reason, the bot uses MSAL.NET directly.
+NOTE: For ASP.NET Core web APIs, Microsoft recommends Microsoft.Identity.Web for OBO.[^msal-obo] Microsoft.Identity.Web uses the bearer token that the web API received and validated.[^miw-obo] In a bot, that token is the service token, not the SSO token. For this reason, the bot uses MSAL.NET directly. The settings in `SsoApp:ClientCredentials` have the same names as the Microsoft.Identity.Web settings.[^fic-miw]
 
 ## 8 Why the user sees no prompt
 
@@ -249,7 +282,7 @@ The flow has three places where a prompt can occur. Each place has a condition t
 
 ```mermaid
 flowchart TD
-    S1{"Is the Teams client<br/>pre-authorized for the bot scope?"}
+    S1{"Is the Teams client<br/>pre-authorized for the SSO app scope?"}
     S1 -- "No" --> P1["Teams shows a consent dialog"]
     S1 -- "Yes" --> S2{"Did an administrator give consent<br/>for the downstream API scope?"}
     S2 -- "No" --> P2["OBO returns AADSTS65001<br/>Teams shows the Sign in button"]
@@ -260,11 +293,11 @@ flowchart TD
 
 Make sure that these conditions are true:
 
-1. The bot app registration exposes the scope `access_as_user` at the Application ID URI `api://botid-<bot ID>`.[^bot-uri][^bot-scope]
+1. The SSO app registration exposes the scope `access_as_user` at the Application ID URI `api://botid-<SSO app ID>`.[^bot-uri][^bot-scope]
 2. The Teams client IDs `1fec8e78-bce4-4aaf-ab1b-5451cc387264` and `5e3ce6c0-2b1f-4285-8d4b-75ee78787346` have pre-authorization for this scope.[^bot-clients] Then Entra ID does not ask the user for consent.[^expose-api]
-3. In the Teams manifest, `webApplicationInfo.id` is the bot ID and `webApplicationInfo.resource` is the Application ID URI.[^bot-manifest]
-4. The bot app registration has the delegated permission `access_as_user` of the downstream API.
-5. An administrator gave admin consent for the bot app registration.[^obo-admin][^grant-consent]
+3. In the Teams manifest, `webApplicationInfo.id` is the SSO app ID and `webApplicationInfo.resource` is the Application ID URI.[^bot-manifest] Do not use the bot ID (the managed identity) in `webApplicationInfo`.[^uami-manifest]
+4. The SSO app registration has the delegated permission `access_as_user` of the downstream API.
+5. An administrator gave admin consent for the SSO app registration.[^obo-admin][^grant-consent]
 6. The Token Exchange URL of the OAuth connection is the Application ID URI.[^bot-oauth]
 7. The user installed the app in the personal scope. If not, Teams asks the user to install it.[^ua-handle]
 8. The card is in a one-on-one chat or a group chat. Microsoft does not support bot SSO in channels.[^bot-sso-scope]
@@ -341,7 +374,7 @@ The Scopes setting of the OAuth connection must be the scope of the downstream A
 | The SSO token is not valid: signature, issuer, audience, expiry, tenant, scope or user | 412 `preconditionFailed`[^ua-receive] | Sign in button |
 | There is no consent for the downstream API (`AADSTS65001`)[^errors] | 401 `loginRequest` without `tokenExchangeResource` | Sign in button |
 | A Conditional Access policy asks for MFA (`AADSTS50076`, `interaction_required`)[^errors][^obo-error] | 401 `loginRequest` without `tokenExchangeResource` | Sign in button |
-| The configuration is incorrect (`AADSTS7000215`, `AADSTS70011`, `AADSTS50013`)[^errors] | 200 with an error card | Error card with the AADSTS code, if `Sso:ShowDiagnostics` is `true` |
+| The configuration is incorrect (`AADSTS70021`, `AADSTS7000215`, `AADSTS70011`, `AADSTS50013`)[^errors][^fic-propagate] | 200 with an error card | Error card with the AADSTS code, if `Sso:ShowDiagnostics` is `true` |
 | The magic code is not correct or is too old | 401 `loginRequest` without `tokenExchangeResource` | Sign in button |
 | The downstream API rejects the OBO token (401 or 403) | 200 with an error card | Error card |
 | The card action has an unknown verb | 400 error | Teams error message |
@@ -355,10 +388,11 @@ The Scopes setting of the OAuth connection must be the scope of the downstream A
 4. If a token has an unknown signing key, the bot gets the keys again one time. Microsoft recommends this behavior.[^key-rollover]
 5. The downstream API accepts only tokens for its own audience.[^tokens-validate] It rejects the SSO token. It also rejects app-only tokens, because they have no `scp` claim.[^claims][^miw-scopes]
 6. The bot keeps tokens in memory only. It does not write tokens to the logs or to the cards.
+7. In Azure, the bot has no secret. The credential of the SSO app is a managed identity token.[^mi-fic] Nobody can read the credentials of a managed identity: "Credentials aren't even accessible to you."[^mi-overview]
 
 WARNING: Do not set the log level of `Microsoft.Teams` to `Trace` in a shared or production environment. At this level, the Teams SDK writes each invoke activity to the log.[^sdk-trace] The SSO token is in the invoke activity.
 
-CAUTION: Do not use a client secret in production. Use a certificate[^cert-creds] or a managed identity with a federated credential.[^fic] A secret can leak, and it expires.[^errors]
+CAUTION: Remove the client secret of the SSO app registration if you do not run the bot on your computer. A secret can leak, and it expires.[^errors]
 
 ## 13 The two strategies
 
@@ -375,11 +409,11 @@ flowchart LR
     end
 ```
 
-With `TokenService`, the Bot Framework token service uses the client ID and the secret of the OAuth connection to get the token.[^bot-oauth]
+With `TokenService`, the Bot Framework token service uses the client ID and the credential of the OAuth connection to get the token.[^bot-oauth] The OAuth connection uses the SSO app registration. Its credential is a client secret, or a federated credential with the service provider **AAD v2 with Federated Credentials**.[^bot-fic]
 
 | Item | `Obo` | `TokenService` |
 | --- | --- | --- |
-| Component that sends the OBO request | The bot, with MSAL.NET | The Bot Framework token service, with the client ID, secret and scopes of the OAuth connection |
+| Component that sends the OBO request | The bot, with MSAL.NET and the managed identity as the credential | The Bot Framework token service, with the client ID, credential and scopes of the OAuth connection |
 | Token storage | MSAL.NET memory cache only. Each click starts the SSO steps again. | The token service keeps the token.[^bf-token-service] Later clicks do not start the SSO steps. |
 | Number of downstream APIs | Many. The bot can use one SSO token for many APIs. | One API for each OAuth connection |
 | Conditional Access claims challenge | The code gets it in `InteractionRequiredException.Claims`[^obo-error] | The token service does not give it to the code |
@@ -396,9 +430,12 @@ For more than one bot instance, use a distributed token cache with MSAL.NET. Mic
 | Builds the `loginRequest`, 412, card and error responses | `src/Bot/Sso/CardActionResponses.cs` |
 | Validates the SSO token | `src/Bot/Sso/SsoTokenValidator.cs` |
 | Sends the OBO request, or uses the token service | `src/Bot/Sso/DownstreamTokenStrategies.cs` |
+| Adds the credential of the SSO app: managed identity token or client secret | `src/Bot/Sso/SsoAppCredential.cs` |
+| Reads the `SsoApp` settings, or the `AzureAd` settings if `SsoApp:ClientId` is empty | `src/Bot/Sso/SsoOptions.cs` |
 | Calls the Bot Framework token service | `src/Bot/Sso/TokenServiceClient.cs` |
 | Validates the OBO token in the downstream API | `src/DownstreamApi/Program.cs` |
 | Tests each step with a test tenant | `test/Bot.Tests/EndToEndTests.cs` |
+| Tests the OBO request with the managed identity credential, against a simulated managed identity endpoint and Entra ID | `test/Bot.Tests/SsoAppCredentialTests.cs` |
 
 ## 15 Writing standard
 
@@ -414,7 +451,7 @@ A full check against the STE dictionary is still necessary.
 
 ## 16 How the sources were checked
 
-- Microsoft Learn pages without a mark: the source text of the page agrees with the claim. The source text is in the public repositories `MicrosoftDocs/entra-docs` and `MicrosoftDocs/msteams-docs`.
+- Microsoft Learn pages without a mark: the source text of the page agrees with the claim. The source text is in the public repositories `MicrosoftDocs/entra-docs`, `MicrosoftDocs/msteams-docs` and `dotnet/AspNetCore.Docs`.
 - Microsoft Learn pages with a dagger (†): only a search summary of the page agrees with the claim. Read these pages before you rely on them.
 - GitHub links: the Microsoft source code agrees with the claim. The links go to the lines at a fixed version.
 
@@ -437,8 +474,6 @@ A full check against the STE dictionary is still necessary.
 [^expose-api]: [Configure an application to expose a web API: Add a scope requiring admin and user consent](https://learn.microsoft.com/entra/identity-platform/quickstart-configure-app-expose-web-apis#add-a-scope-requiring-admin-and-user-consent). A pre-authorized client app does not cause a consent prompt.
 [^grant-consent]: [Grant tenant-wide admin consent to an application: Grant admin consent in App registrations pane](https://learn.microsoft.com/entra/identity/enterprise-apps/grant-admin-consent#grant-admin-consent-in-app-registrations-pane).
 [^manifest-version]: [Microsoft Graph app manifest: api attribute](https://learn.microsoft.com/entra/identity-platform/reference-microsoft-graph-app-manifest#api-attribute). `requestedAccessTokenVersion`: "If the value is null, this defaults to 1".
-[^cert-creds]: [Microsoft identity platform application authentication certificate credentials](https://learn.microsoft.com/entra/identity-platform/certificate-credentials).
-[^fic]: [Configure an application to trust a managed identity](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity). Lets an app use a managed identity token instead of a secret.
 [^miw-validation]: [Protected web API: Code configuration: Token validation](https://learn.microsoft.com/entra/identity-platform/scenario-protected-web-api-app-configuration#token-validation). The middleware validates the audience, the issuer, the expiry and the signature.
 [^miw-scopes]: [Protected web API: Verify scopes and app roles: Verify scopes in APIs called on behalf of users](https://learn.microsoft.com/entra/identity-platform/scenario-protected-web-api-verification-scope-app-roles#verify-scopes-in-apis-called-on-behalf-of-users).
 [^msal-obo]: [MSAL.NET: On-behalf-of flow](https://learn.microsoft.com/entra/msal/dotnet/acquiring-tokens/web-apps-apis/on-behalf-of-flow) †. `AcquireTokenOnBehalfOf` looks in the cache itself. The page recommends Microsoft.Identity.Web for ASP.NET Core web APIs.
@@ -463,3 +498,14 @@ A full check against the STE dictionary is still necessary.
 [^sample-401]: [Microsoft Teams Samples: bot-sso-adaptivecard, DialogBot.cs, lines 213 to 242](https://github.com/OfficeDev/Microsoft-Teams-Samples/blob/5bff3363f7e31a1d7f02e60589e0d6c1c9d88102/samples/TeamsSDK/Archived/bot-sso-adaptivecard/csharp/BotSsoAdaptivecard/Bots/DialogBot.cs#L213-L242). The sample returns the `loginRequest` body with `CreateInvokeResponse`.
 [^botbuilder-invoke]: [Bot Framework SDK source: ActivityHandler.cs, lines 137 to 140](https://github.com/microsoft/botbuilder-dotnet/blob/50f60f7e7597683ad156e3d2f00f83afcd242e41/libraries/Microsoft.Bot.Builder/ActivityHandler.cs#L137-L140). `CreateInvokeResponse` sets the status to `HttpStatusCode.OK` (200).
 [^miw-obo]: [A web API that calls web APIs: Code configuration: Program.cs](https://learn.microsoft.com/entra/identity-platform/scenario-web-api-call-api-app-configuration?tabs=aspnetcore#programcs). Microsoft.Identity.Web adds token acquisition after `AddMicrosoftIdentityWebApi`, which validates the bearer token of the request.
+[^mi-overview]: [What is managed identities for Azure resources?: What are managed identities?](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview#what-are-managed-identities). "A managed identity is an identity that can be assigned to an Azure compute resource". "Credentials aren't even accessible to you."
+[^mi-fic]: [What is managed identities for Azure resources?: Use managed identity as a Federated Identity Credential (FIC) on an Entra ID app](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview#use-managed-identity-as-a-federated-identity-credential-fic-on-an-entra-id-app). "Workload Identity Federation enables using a managed identity as a credential, just like certificate or password, on Entra ID Applications."
+[^mi-cache]: [Connecting from your application to resources without handling credentials: Cache the tokens you acquire](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview-for-developers#cache-the-tokens-you-acquire). "Managed identity tokens are valid for 24 hours".
+[^fic-values]: [Configure an application to trust a managed identity: Important considerations and restrictions](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity#important-considerations-and-restrictions). Entra ID compares the issuer and subject of the federated credential with the claims of the managed identity token. The audience is `api://AzureADTokenExchange`.
+[^fic-msal]: [Configure an application to trust a managed identity: MSAL (.NET)](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity#msal-net). A managed identity token "can then be used as a client assertion when constructing a confidential client application".
+[^fic-miw]: [Configure an application to trust a managed identity: Microsoft.Identity.Web](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity#microsoftidentityweb). `SourceType` `SignedAssertionFromManagedIdentity` with `ManagedIdentityClientId`.
+[^fic-propagate]: [Important considerations and restrictions for federated identity credentials: Time for federated credential changes to propagate](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-considerations#time-for-federated-credential-changes-to-propagate). "AADSTS70021: No matching federated identity record found for presented assertion."
+[^uami-sso]: [Enable SSO for your bot app: Enable SSO for a Teams app](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-overview#enable-sso-for-a-teams-app). "If your bot is created using User-Assigned Managed Identity, an App Registration isn't automatically created. You must create a separate App Registration".
+[^uami-manifest]: [Update app manifest for SSO: webApplicationInfo property](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-manifest#webapplicationinfo-property). With the managed identity ID in `webApplicationInfo`, "app installation fails".
+[^sdk-uami-config]: [Teams SDK documentation source: C# app authentication, line 94](https://github.com/microsoft/teams-sdk/blob/0187ab0b2c43a9f21e9398a593835802d62fbecb/teams.md/src/components/include/essentials/app-authentication/csharp.incl.md#L94). "automatically use User Assigned Managed Identity authentication when you provide the `ClientId` without a `ClientSecret`".
+[^bot-fic]: [Implement authentication with federated identity credentials](https://learn.microsoft.com/azure/bot-service/bot-builder-authentication-federated-credential) †. The OAuth connection service provider **AAD v2 with Federated Credentials**.
