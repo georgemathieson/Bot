@@ -87,7 +87,7 @@ Four identities take part in the flow:
 | App | Client ID | Function in the flow |
 | --- | --- | --- |
 | Teams client | `1fec8e78-bce4-4aaf-ab1b-5451cc387264` (desktop and mobile), `5e3ce6c0-2b1f-4285-8d4b-75ee78787346` (web)[^bot-clients] | Microsoft owns these apps. The Teams client asks Entra ID for the SSO token. |
-| User-assigned managed identity | Your bot ID | The identity of the Azure Bot. The Teams SDK uses it for Bot Framework traffic.[^sdk-uami-config] It is also the credential of the SSO app registration.[^mi-fic] |
+| User-assigned managed identity | Your bot ID | The identity of the Azure Bot. The Agents SDK uses it for Bot Framework traffic.[^asdk-uami] It is also the credential of the SSO app registration.[^mi-fic] |
 | SSO app registration | Your SSO app ID | It exposes the scope `api://botid-<SSO app ID>/access_as_user`.[^bot-uri] The bot asks for the OBO token as this app. A managed identity cannot expose a scope, so this app is necessary.[^uami-sso] |
 | Downstream API app registration | Your API ID | It exposes the scope `api://<API ID>/access_as_user`.[^expose-api] The downstream API accepts the OBO token. |
 
@@ -106,7 +106,7 @@ flowchart LR
 
 ## 5 The three tokens
 
-Each request from the Bot Connector to the bot has a service token. The bot must validate this token.[^connector-auth] The Teams SDK expects the issuer `https://api.botframework.com`.[^sdk-issuer] The service token identifies the Bot Connector. It has no user claims and no `scp` claim, so it is not a user token.
+Each request from the Bot Connector to the bot has a service token. The bot must validate this token.[^connector-auth] The Agents SDK expects the issuer `https://api.botframework.com`.[^asdk-issuer] The service token identifies the Bot Connector. It has no user claims and no `scp` claim, so it is not a user token.
 
 The user name in a request comes from `activity.from`. This field is not a token. The bot cannot use it to get a token.
 
@@ -129,7 +129,7 @@ flowchart LR
 
 | Claim | Service token | SSO token | OBO token |
 | --- | --- | --- | --- |
-| `iss` | `https://api.botframework.com`[^sdk-issuer] | Entra ID, your tenant | Entra ID, your tenant |
+| `iss` | `https://api.botframework.com`[^asdk-issuer] | Entra ID, your tenant | Entra ID, your tenant |
 | `aud` | Bot ID | SSO app ID (v2). In v1 tokens, the client ID or the resource URI, for example `api://botid-<SSO app ID>`.[^claims] | API ID (v2). In v1 tokens, the client ID or `api://<API ID>`.[^claims] |
 | `azp` or `appid` | None | Teams client ID | SSO app ID |
 | `scp` | None | `access_as_user` | `access_as_user` |
@@ -176,11 +176,11 @@ sequenceDiagram
 | Step | Description | Code |
 | --- | --- | --- |
 | 1 | The user clicks the `Action.Execute` button on the card. | `Cards.Welcome` |
-| 2 to 3 | Teams sends an `adaptiveCard/action` invoke activity.[^sdk-actions] The Bot Connector sends it to the bot with a service token. The Teams SDK validates the service token.[^connector-auth] | `Program.cs`, `OnAdaptiveCardAction` |
-| 4 to 5 | The bot asks the token service for the sign-in resource of the OAuth connection. The response has a sign-in link and a `tokenExchangeResource`. The sign-in state must contain the app ID, or the token service does not return a `tokenExchangeResource`.[^sdk-oauthflow] | `TokenServiceClient.GetSignInResourceAsync` |
-| 6 | The bot replies with a `loginRequest`. The body has `statusCode` 401 and the `tokenExchangeResource`.[^ua-handle] The HTTP status is 200, as in the Microsoft C# sample.[^sample-401][^botbuilder-invoke] The Bot Connector sends the reply to the Teams client. | `CardActionSso`, `CardActionResponses.LoginRequest` |
+| 2 to 3 | Teams sends an `adaptiveCard/action` invoke activity.[^asdk-actions] The Bot Connector sends it to the bot with a service token. The bot validates the service token with the Microsoft sample code.[^connector-auth][^asdk-auth-sample] | `SsoBot`, `AdaptiveCards.OnActionExecute` |
+| 4 to 5 | The bot asks the token service for the sign-in resource of the OAuth connection. The response has a sign-in link and a `tokenExchangeResource`. The sign-in state must contain the app ID, or the token service does not return a `tokenExchangeResource`. The Agents SDK puts the app ID in the sign-in state.[^asdk-state] | `TokenServiceClient.GetSignInResourceAsync` |
+| 6 | The bot replies with a `loginRequest`. The body has `statusCode` 401 and the `tokenExchangeResource`.[^ua-handle] The HTTP status is 200, as in the Microsoft C# sample.[^sample-401][^botbuilder-invoke] The Agents SDK also uses HTTP status 200.[^asdk-route] The Bot Connector sends the reply to the Teams client. | `CardActionSso`, `CardActionResponses.LoginRequest` |
 | 7 to 8 | The Teams client uses the `tokenExchangeResource` to get a token from Entra ID.[^ua-handle] It uses the current session of the user. Entra ID returns the SSO token. | Teams client |
-| 9 | The Teams client sends the same invoke activity again, through the Bot Connector. The SSO token is in `value.authentication.token`.[^ua-receive] The SDK type for this value does not contain `authentication`, so the bot reads the raw JSON.[^sdk-value][^sdk-raw] | `CardActionTurn.FromContext` |
+| 9 | The Teams client sends the same invoke activity again, through the Bot Connector. The SSO token is in `value.authentication.token`.[^ua-receive] The Agents SDK type for this value has `authentication` and `state`.[^asdk-value] | `CardActionTurn.FromContext` |
 | 10 | The bot validates the SSO token. Section 12 gives the checks. | `SsoTokenValidator` |
 | 11 to 12 | The bot sends the OBO request to Entra ID as the SSO app. A managed identity token is the credential. Entra ID returns the OBO token. Section 7 gives the details.[^obo-request] | `OboTokenStrategy`, `MsalOboTokenAcquirer`, `SsoAppCredential` |
 | 13 to 15 | The bot sends a request to the downstream API with the OBO token. The API validates the token and returns the user data.[^miw-validation] | `DownstreamApiClient`, `src/DownstreamApi/Program.cs` |
@@ -333,7 +333,7 @@ The responses come from the Microsoft protocol:
 - If the token exchange fails, the bot must reply with a 412 error or with a sign-in request without SSO information.[^ua-receive]
 - After the Sign in button, the Teams client sends the code in `state`.[^ua-flow]
 
-All responses use HTTP status 200, as in the Microsoft C# sample.[^sample-401][^botbuilder-invoke] The Teams client reads the `statusCode` in the response body.
+All responses use HTTP status 200, as in the Microsoft C# sample.[^sample-401][^botbuilder-invoke] The Agents SDK sends the response of the card action in this way.[^asdk-route] The Teams client reads the `statusCode` in the response body.
 
 ## 10 The fallback path
 
@@ -382,7 +382,7 @@ The Scopes setting of the OAuth connection must be the scope of the downstream A
 
 ## 12 Security controls
 
-1. The Teams SDK validates the service token on each request to `/api/messages`.[^connector-auth] Only the Bot Connector can send activities to the bot.
+1. The bot validates the service token on each request to `/api/messages`.[^connector-auth] Only the Bot Connector can send activities to the bot. The Agents SDK turns off this validation in the Development environment.[^asdk-auth-dev] This bot turns it on in all environments.
 2. The bot validates the SSO token before it uses the token. It examines the signature, the issuer, the audience, the expiry, the tenant and the scope.[^tokens-validate][^claims]
 3. The bot makes sure that the `oid` claim of the SSO token is the same as `activity.from.aadObjectId`. This check prevents the use of a token in the activity of a different user.
 4. If a token has an unknown signing key, the bot gets the keys again one time. Microsoft recommends this behavior.[^key-rollover]
@@ -390,7 +390,7 @@ The Scopes setting of the OAuth connection must be the scope of the downstream A
 6. The bot keeps tokens in memory only. It does not write tokens to the logs or to the cards.
 7. In Azure, the bot has no secret. The credential of the SSO app is a managed identity token.[^mi-fic] Nobody can read the credentials of a managed identity: "Credentials aren't even accessible to you."[^mi-overview]
 
-WARNING: Do not set the log level of `Microsoft.Teams` to `Trace` in a shared or production environment. At this level, the Teams SDK writes each invoke activity to the log.[^sdk-trace] The SSO token is in the invoke activity.
+WARNING: Do not set the log level of `Microsoft.Agents` to `Debug` in a shared or production environment. At this level, the Agents SDK writes each activity that it receives to the log.[^asdk-debug-log] The SSO token is in the invoke activity.
 
 CAUTION: Remove the client secret of the SSO app registration if you do not run the bot on your computer. A secret can leak, and it expires.[^errors]
 
@@ -424,14 +424,16 @@ For more than one bot instance, use a distributed token cache with MSAL.NET. Mic
 
 | Function | File |
 | --- | --- |
-| Routes the invoke activity to the SSO logic | `src/Bot/Program.cs` |
+| Hosts the agent and validates the service token | `src/Bot/Program.cs`, `src/Bot/Hosting/AspNetExtensions.cs` |
+| Routes the invoke activity to the SSO logic | `src/Bot/SsoBot.cs` |
+| Reads the bot identity from the service connection | `src/Bot/Sso/BotIdentity.cs` |
 | Reads the invoke value and `value.authentication` | `src/Bot/Sso/CardActionTurn.cs` |
 | Runs the decision logic of section 9 | `src/Bot/Sso/CardActionSso.cs` |
 | Builds the `loginRequest`, 412, card and error responses | `src/Bot/Sso/CardActionResponses.cs` |
 | Validates the SSO token | `src/Bot/Sso/SsoTokenValidator.cs` |
 | Sends the OBO request, or uses the token service | `src/Bot/Sso/DownstreamTokenStrategies.cs` |
 | Adds the credential of the SSO app: managed identity token or client secret | `src/Bot/Sso/SsoAppCredential.cs` |
-| Reads the `SsoApp` settings, or the `AzureAd` settings if `SsoApp:ClientId` is empty. Uses the managed identity of the bot as the default credential of the SSO app. | `src/Bot/Sso/SsoOptions.cs` |
+| Reads the `SsoApp` settings, or the service connection if `SsoApp:ClientId` is empty. Uses the managed identity of the bot as the default credential of the SSO app. | `src/Bot/Sso/SsoOptions.cs` |
 | Calls the Bot Framework token service | `src/Bot/Sso/TokenServiceClient.cs` |
 | Validates the OBO token in the downstream API | `src/DownstreamApi/Program.cs` |
 | Tests each step with a test tenant | `test/Bot.Tests/EndToEndTests.cs` |
@@ -489,12 +491,6 @@ A full check against the STE dictionary is still necessary.
 [^tab-cache]: [Add code to enable SSO for tabs: Add code for getAuthToken](https://learn.microsoft.com/microsoftteams/platform/tabs/how-to/authentication/tab-sso-code#add-code-for-getauthtoken). "When Teams receives the access token, it's cached and reused as needed."
 [^bf-token-service]: [User authentication (Azure AI Bot Service)](https://learn.microsoft.com/azure/bot-service/bot-builder-concept-authentication) †. The Bot Framework token service keeps tokens for a bot, channel and user.
 [^connector-auth]: [Authentication with the Bot Connector API](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication) †. The bot must validate the token from the Bot Connector.
-[^sdk-actions]: [Teams SDK: Executing actions](https://learn.microsoft.com/microsoftteams/platform/teams-sdk/in-depth-guides/adaptive-cards/executing-actions) †. Universal Actions arrive as `adaptiveCard/action` invoke activities.
-[^sdk-issuer]: [Teams SDK for .NET source: BotConfig.cs, lines 23 to 27](https://github.com/microsoft/teams.net/blob/v2.1.1/src/Microsoft.Teams.Core/Hosting/BotConfig.cs#L23-L27). The default issuer is `https://api.botframework.com`.
-[^sdk-oauthflow]: [Teams SDK for .NET source: OAuthFlow.cs, lines 179 to 215](https://github.com/microsoft/teams.net/blob/v2.1.1/src/Microsoft.Teams.Apps/OAuth/OAuthFlow.cs#L179-L215). "Build state with MsAppId so the Token Service returns TokenExchangeResource for SSO".
-[^sdk-value]: [Teams SDK for .NET source: AdaptiveCardHandlers.Values.cs, lines 12 to 31](https://github.com/microsoft/teams.net/blob/v2.1.1/src/Microsoft.Teams.Apps/Handlers/AdaptiveCardHandlers.Values.cs#L12-L31). `AdaptiveCardActionValue` has `action`, `state` and `trigger` only.
-[^sdk-raw]: [Teams SDK for .NET source: InvokeHandler.Activity.cs, line 40](https://github.com/microsoft/teams.net/blob/v2.1.1/src/Microsoft.Teams.Apps/Handlers/InvokeHandler.Activity.cs#L40). The raw invoke value is a `JsonNode`.
-[^sdk-trace]: [Teams SDK for .NET source: Router.cs, line 188](https://github.com/microsoft/teams.net/blob/v2.1.1/src/Microsoft.Teams.Apps/Routing/Router.cs#L188). At `Trace` level, the router writes the invoke activity JSON to the log.
 [^sample-401]: [Microsoft Teams Samples: bot-sso-adaptivecard, DialogBot.cs, lines 213 to 242](https://github.com/OfficeDev/Microsoft-Teams-Samples/blob/5bff3363f7e31a1d7f02e60589e0d6c1c9d88102/samples/TeamsSDK/Archived/bot-sso-adaptivecard/csharp/BotSsoAdaptivecard/Bots/DialogBot.cs#L213-L242). The sample returns the `loginRequest` body with `CreateInvokeResponse`.
 [^botbuilder-invoke]: [Bot Framework SDK source: ActivityHandler.cs, lines 137 to 140](https://github.com/microsoft/botbuilder-dotnet/blob/50f60f7e7597683ad156e3d2f00f83afcd242e41/libraries/Microsoft.Bot.Builder/ActivityHandler.cs#L137-L140). `CreateInvokeResponse` sets the status to `HttpStatusCode.OK` (200).
 [^miw-obo]: [A web API that calls web APIs: Code configuration: Program.cs](https://learn.microsoft.com/entra/identity-platform/scenario-web-api-call-api-app-configuration?tabs=aspnetcore#programcs). Microsoft.Identity.Web adds token acquisition after `AddMicrosoftIdentityWebApi`, which validates the bearer token of the request.
@@ -507,5 +503,13 @@ A full check against the STE dictionary is still necessary.
 [^fic-propagate]: [Important considerations and restrictions for federated identity credentials: Time for federated credential changes to propagate](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-considerations#time-for-federated-credential-changes-to-propagate). "AADSTS70021: No matching federated identity record found for presented assertion."
 [^uami-sso]: [Enable SSO for your bot app: Enable SSO for a Teams app](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-overview#enable-sso-for-a-teams-app). "If your bot is created using User-Assigned Managed Identity, an App Registration isn't automatically created. You must create a separate App Registration".
 [^uami-manifest]: [Update app manifest for SSO: webApplicationInfo property](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-manifest#webapplicationinfo-property). With the managed identity ID in `webApplicationInfo`, "app installation fails".
-[^sdk-uami-config]: [Teams SDK documentation source: C# app authentication, line 94](https://github.com/microsoft/teams-sdk/blob/0187ab0b2c43a9f21e9398a593835802d62fbecb/teams.md/src/components/include/essentials/app-authentication/csharp.incl.md#L94). "automatically use User Assigned Managed Identity authentication when you provide the `ClientId` without a `ClientSecret`".
 [^bot-fic]: [Implement authentication with federated identity credentials](https://learn.microsoft.com/azure/bot-service/bot-builder-authentication-federated-credential) †. The OAuth connection service provider **AAD v2 with Federated Credentials**.
+[^asdk-issuer]: [Agents SDK for .NET source: AuthenticationConstants.cs, line 52](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Core/Microsoft.Agents.Authentication/AuthenticationConstants.cs#L52). The Bot Framework token issuer is `https://api.botframework.com`.
+[^asdk-uami]: [Agents SDK for .NET source: MsalAuth.cs, lines 300 to 306](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Authentication/Authentication.Msal/MsalAuth.cs#L300-L306). With `AuthType` `UserManagedIdentity`, the connection gets tokens from the user-assigned managed identity whose client ID is `ClientId`.
+[^asdk-actions]: [Agents SDK for .NET source: AdaptiveCard.cs, line 25](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Builder/Microsoft.Agents.Builder/App/AdaptiveCards/AdaptiveCard.cs#L25). The invoke name of a card action is `adaptiveCard/action`.
+[^asdk-value]: [Agents SDK for .NET source: AdaptiveCardInvokeValue.cs, lines 29 to 32](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Core/Microsoft.Agents.Core/Models/AdaptiveCardInvokeValue.cs#L29-L32). The `adaptiveCard/action` value has `Authentication` and `State`.
+[^asdk-route]: [Agents SDK for .NET source: ActionExecuteRouteBuilder.cs, lines 117 to 124](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Builder/Microsoft.Agents.Builder/App/AdaptiveCards/ActionExecuteRouteBuilder.cs#L117-L124). The handler response goes in an invoke response with HTTP status 200.
+[^asdk-state]: [Agents SDK for .NET source: RestUserTokenClient.cs, lines 151 to 162](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Client/Microsoft.Agents.Connector/RestUserTokenClient.cs#L151-L162). The sign-in state contains `MsAppId`.
+[^asdk-auth-sample]: [Agents SDK for .NET source: AgentHostExtensions.cs, lines 106 to 108](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Hosting/AspNetCore/AgentHostExtensions.cs#L106-L108). "The sample-provided `AddAgentAspNetAuthentication` is the default implementation".
+[^asdk-auth-dev]: [Agents SDK for .NET source: AgentHostExtensions.cs, line 136](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Hosting/AspNetCore/AgentHostExtensions.cs#L136). Without `forceEnable`, validation is on only outside the Development environment.
+[^asdk-debug-log]: [Agents SDK for .NET source: ChannelServiceAdapterBase.cs, lines 228 to 231](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Builder/Microsoft.Agents.Builder/ChannelServiceAdapterBase.cs#L228-L231). At `Debug` level, the adapter writes the activity JSON to the log.

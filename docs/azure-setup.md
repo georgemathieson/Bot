@@ -18,7 +18,7 @@ The bot uses three Entra ID identities. In Azure, the bot uses no secret. Only t
 
 | Identity | Function |
 | --- | --- |
-| User-assigned managed identity | The identity of the Azure Bot. The Teams SDK uses it for Bot Framework traffic.[^sdk-uami-config] The identity is also the credential of the SSO app registration.[^mi-fic] |
+| User-assigned managed identity | The identity of the Azure Bot. The Agents SDK uses it for Bot Framework traffic.[^asdk-uami] The identity is also the credential of the SSO app registration.[^mi-fic] |
 | SSO app registration | Teams gets the SSO token for this app. The bot sends the OBO request as this app. A managed identity cannot expose an API scope, so this app is necessary.[^uami-sso] |
 | Downstream API app registration | The "other service". The OBO token is for this app. |
 
@@ -32,7 +32,7 @@ These values must be the same in all of their locations:
 
 | Value | Locations |
 | --- | --- |
-| `<bot ID>` | Managed identity, client ID. Azure Bot, Microsoft App ID. Manifest, `bots[0].botId`. Bot setting `AzureAd:ClientId`. |
+| `<bot ID>` | Managed identity, client ID. Azure Bot, Microsoft App ID. Manifest, `bots[0].botId`. Bot setting `Connections:ServiceConnection:Settings:ClientId`. |
 | `<SSO app ID>` | SSO app registration, client ID. Manifest, `webApplicationInfo.id`. OAuth connection, Client id. Bot setting `SsoApp:ClientId`. |
 | `api://botid-<SSO app ID>` | SSO app registration, Expose an API, Application ID URI. Manifest, `webApplicationInfo.resource`. OAuth connection, Token Exchange URL. Bot setting `Sso:BotAppIdUri` (default value). |
 | `api://<API ID>/access_as_user` | Downstream API app registration, scope. SSO app registration, API permissions. OAuth connection, Scopes. Bot setting `DownstreamApi:Scopes`. |
@@ -187,14 +187,14 @@ A managed identity operates only on an Azure resource that has the identity.[^mi
 CAUTION: Do not put the client secret in `appsettings.json`. All people with access to the repository can read its files. Microsoft recommends that you keep secrets out of source code.[^user-secrets]
 
 ```bash
-dotnet user-secrets set "AzureAd:TenantId" "<tenant ID>" --project src/Bot
-dotnet user-secrets set "AzureAd:ClientId" "<SSO app ID>" --project src/Bot
-dotnet user-secrets set "AzureAd:ClientCredentials:0:SourceType" "ClientSecret" --project src/Bot
-dotnet user-secrets set "AzureAd:ClientCredentials:0:ClientSecret" "<secret>" --project src/Bot
+dotnet user-secrets set "Connections:ServiceConnection:Settings:AuthType" "ClientSecret" --project src/Bot
+dotnet user-secrets set "Connections:ServiceConnection:Settings:ClientId" "<SSO app ID>" --project src/Bot
+dotnet user-secrets set "Connections:ServiceConnection:Settings:TenantId" "<tenant ID>" --project src/Bot
+dotnet user-secrets set "Connections:ServiceConnection:Settings:ClientSecret" "<secret>" --project src/Bot
 dotnet user-secrets set "DownstreamApi:Scopes:0" "api://<API ID>/access_as_user" --project src/Bot
 ```
 
-Do not set `SsoApp:ClientId` on your computer. If `SsoApp:ClientId` is empty, the bot uses the `AzureAd` app registration and its secret for SSO and OBO.
+Do not set `SsoApp:ClientId` on your computer. If `SsoApp:ClientId` is empty, the bot uses the app registration and the secret of the service connection for SSO and OBO. The `AuthType` values come from the Agents SDK.[^asdk-authtypes]
 
 ## 4 Make the Azure Bot resource
 
@@ -277,13 +277,14 @@ In application settings, a double underscore (`__`) replaces each colon (`:`) of
 
 | Setting | Value |
 | --- | --- |
-| `AzureAd__TenantId` | Your tenant ID |
-| `AzureAd__ClientId` | The bot ID. Do not set `ClientCredentials` in `AzureAd`. Then the Teams SDK uses the managed identity.[^sdk-uami-config] |
-| `SsoApp__ClientId` | The SSO app ID. The bot uses its managed identity (`AzureAd__ClientId`) as the credential of the SSO app. |
+| `Connections__ServiceConnection__Settings__AuthType` | `UserManagedIdentity`. This is also the value in `appsettings.json`. Then the Agents SDK uses the managed identity.[^asdk-uami] |
+| `Connections__ServiceConnection__Settings__ClientId` | The bot ID |
+| `Connections__ServiceConnection__Settings__TenantId` | Your tenant ID |
+| `SsoApp__ClientId` | The SSO app ID. The bot uses its managed identity as the credential of the SSO app. |
 | `DownstreamApi__Url` | The URL of the downstream API, for example `https://<API host>/api/me` |
 | `DownstreamApi__Scopes__0` | `api://<API ID>/access_as_user` |
 
-None of these settings is a secret. The bot identity is in one setting, `AzureAd__ClientId`. To override the credential of the SSO app, set `SsoApp:ClientCredentials`. Its setting names are the same as in Microsoft.Identity.Web.[^fic-miw]
+None of these settings is a secret. The bot identity is in one setting, `Connections__ServiceConnection__Settings__ClientId`. The inbound token validation uses it as its audience. To override the credential of the SSO app, set `SsoApp:ClientCredentials`. Its setting names are the same as in Microsoft.Identity.Web.[^fic-miw]
 
 ## 7 Optional: run the bot on your computer
 
@@ -309,7 +310,7 @@ dotnet run --project src/DownstreamApi
 dotnet run --project src/Bot
 ```
 
-The bot log shows the identity that the bot uses. On your computer, the log line "Bot ready" shows "SSO app: \<SSO app ID\> from AzureAd with ClientSecret". In Azure, it shows "from SsoApp with federated credential from managed identity \<bot ID\>".
+The bot log shows the identity that the bot uses. On your computer, the log line "Bot ready" shows "bot identity: ClientSecret" and "from Connections:ServiceConnection:Settings with ClientSecret". In Azure, it shows "bot identity: UserManagedIdentity" and "from SsoApp with federated credential from managed identity \<bot ID\>".
 
 ## 8 Install the Teams app
 
@@ -382,9 +383,10 @@ If the card shows a **Sign in** button or an error, read [troubleshooting.md](tr
 [^separate-app]: [Configure your bot app in Microsoft Entra ID: To configure authorized client application](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-register-aad?tabs=botid#to-configure-authorized-client-application). A `webApplicationInfo` ID that is not the Azure Bot app ID "is a valid and supported configuration".
 [^bot-types]: [Add authentication to your Teams bot: Create Azure Bot resource registration](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/add-authentication#create-azure-bot-resource-registration). "All new bot registrations must either use the Single Tenant bot type or the User-Assigned Managed Identity type."
 [^sdk-uami]: [Teams SDK documentation source: User Assigned Managed Identity Setup, lines 25 to 33](https://github.com/microsoft/teams-sdk/blob/0187ab0b2c43a9f21e9398a593835802d62fbecb/teams.md/docs/main/teams/app-authentication/user-managed-identity.md#L25-L33). Set **Type of App** to User Assigned Managed Identity. Assign the identity to the service that runs the bot.
-[^sdk-uami-config]: [Teams SDK documentation source: C# app authentication, line 94](https://github.com/microsoft/teams-sdk/blob/0187ab0b2c43a9f21e9398a593835802d62fbecb/teams.md/src/components/include/essentials/app-authentication/csharp.incl.md#L94). "automatically use User Assigned Managed Identity authentication when you provide the `ClientId` without a `ClientSecret`".
 [^azcli-identity]: [Azure CLI source: identity commands.py, lines 21 to 23](https://github.com/Azure/azure-cli/blob/3efe60f58acc8e2b397c0bf9b34fe57a7618b387/src/azure-cli/azure/cli/command_modules/identity/commands.py#L21-L23). The `az identity` group has the `create` command.
 [^azcli-bot]: [Azure CLI source: botservice _params.py, lines 60 to 63](https://github.com/Azure/azure-cli/blob/3efe60f58acc8e2b397c0bf9b34fe57a7618b387/src/azure-cli/azure/cli/command_modules/botservice/_params.py#L60-L63). `az bot create` has `--appid`, `--app-type` (`UserAssignedMSI`), `--tenant-id` and `--msi-resource-id`.
 [^bot-fic]: [Implement authentication with federated identity credentials](https://learn.microsoft.com/azure/bot-service/bot-builder-authentication-federated-credential) †. The OAuth connection service provider **AAD v2 with Federated Credentials**.
 [^agents-fic]: [Add user authorization using federated identity credential](https://learn.microsoft.com/microsoft-365/agents-sdk/azure-bot-user-authorization-federated-credentials) †. The subject of the federated credential and the unique identifier of the OAuth connection.
 [^aspnet-env]: [Configuration in ASP.NET Core: Configuration keys and values](https://learn.microsoft.com/aspnet/core/fundamentals/configuration/#configuration-keys-and-values). "A double underscore (`__`) is supported by all platforms and is automatically converted into a colon".
+[^asdk-uami]: [Agents SDK for .NET source: MsalAuth.cs, lines 300 to 306](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Authentication/Authentication.Msal/MsalAuth.cs#L300-L306). With `AuthType` `UserManagedIdentity`, the connection gets tokens from the user-assigned managed identity whose client ID is `ClientId`.
+[^asdk-authtypes]: [Agents SDK for .NET source: AuthTypes.cs, lines 6 to 16](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Authentication/Authentication.Msal/Model/AuthTypes.cs#L6-L16). Includes `ClientSecret` and `UserManagedIdentity`.

@@ -154,9 +154,10 @@ fi
 cat <<EOF
 
 Settings for the bot in Azure (App Service or Container Apps application settings). None of them is a secret.
-The bot's identity is the managed identity (AzureAd); the SSO app uses that identity as its credential:
-  AzureAd__TenantId=$TENANT_ID
-  AzureAd__ClientId=$MI_CLIENT_ID
+The bot's identity is the managed identity (the Agents SDK service connection); the SSO app uses it as its credential:
+  Connections__ServiceConnection__Settings__AuthType=UserManagedIdentity
+  Connections__ServiceConnection__Settings__ClientId=$MI_CLIENT_ID
+  Connections__ServiceConnection__Settings__TenantId=$TENANT_ID
   SsoApp__ClientId=$SSO_APP_ID
   DownstreamApi__Scopes__0=api://$API_APP_ID/access_as_user
   DownstreamApi__Url=https://<downstream-api-host>/api/me
@@ -170,10 +171,10 @@ if [ "$LOCAL_DEV" = "true" ]; then
   # On your computer there is no managed identity: the SSO app registration is also the bot (single-app setup).
   echo "LOCAL_DEV=true: adding a client secret to '$SSO_APP_NAME' and storing local settings with dotnet user-secrets..."
   SSO_SECRET="$(az ad app credential reset --id "$SSO_APP_ID" --display-name "teams-sso-poc-local" --years 1 --query password -o tsv)"
-  secret Bot "AzureAd:TenantId" "$TENANT_ID"
-  secret Bot "AzureAd:ClientId" "$SSO_APP_ID"
-  secret Bot "AzureAd:ClientCredentials:0:SourceType" "ClientSecret"
-  secret Bot "AzureAd:ClientCredentials:0:ClientSecret" "$SSO_SECRET"
+  secret Bot "Connections:ServiceConnection:Settings:AuthType" "ClientSecret"
+  secret Bot "Connections:ServiceConnection:Settings:ClientId" "$SSO_APP_ID"
+  secret Bot "Connections:ServiceConnection:Settings:TenantId" "$TENANT_ID"
+  secret Bot "Connections:ServiceConnection:Settings:ClientSecret" "$SSO_SECRET"
   secret Bot "DownstreamApi:Scopes:0" "api://$API_APP_ID/access_as_user"
 fi
 
