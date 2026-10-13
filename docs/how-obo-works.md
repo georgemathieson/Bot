@@ -142,51 +142,91 @@ CAUTION: Do not send the SSO token to the downstream API. An API must accept onl
 
 ## 6 The full sequence
 
-This sequence shows the silent path. The user clicks once and sees the result. Steps 4 to 9 occur without a prompt.
+This sequence shows the silent path. The user clicks once and sees the result. Steps 4 to 11 occur without a prompt.
+
+### 6.1 The three parts with "bot" in their name
+
+The Bot Connector, the bot and the BF token service are three different parts. Microsoft operates two of them. You operate the bot.
+
+| Part | Operator | Function in this flow | Not a function of this part |
+| --- | --- | --- | --- |
+| Bot Connector | Microsoft. For Teams, its service URLs are on `smba.trafficmanager.net`.[^asdk-hosts] | It carries each activity from the Teams client to the messaging endpoint of the bot.[^bot-endpoint] It adds its service token to each request.[^connector-auth] It carries the HTTP response of the bot back to the Teams client. | It does not give user tokens. It does not run your code. |
+| Bot | You. It is `src/Bot` on your Azure host. | It receives activities at `/api/messages`. It asks the Teams client for the SSO token, validates it, sends the OBO request and calls the downstream API. | It cannot get a user token directly from Entra ID, because it has no session for the user.[^ua-runtime] |
+| BF token service | Microsoft (`token.botframework.com`). | It keeps the OAuth connection of the Azure Bot.[^bot-oauth] It gives the sign-in link and the `tokenExchangeResource` (steps 4 and 5). In the fallback, it keeps the token of the user.[^sso-runtime] With the `TokenService` strategy, it also sends the OBO request (section 13). | It does not carry activities. With the `Obo` strategy, the SSO token does not go through it. |
+
+The Azure Bot resource has the settings for the two Microsoft parts. The messaging endpoint is for the Bot Connector.[^bot-endpoint] The OAuth connection is for the BF token service.[^bot-oauth]
+
+### 6.2 Why the SSO token goes from Entra ID to the Teams client
+
+1. Only the Teams client has a session for the user. The user signed in to Teams, not to the bot.[^ua-runtime]
+2. For this reason, the bot asks the Teams client for a token. It sends a `loginRequest` with a `tokenExchangeResource` (steps 6 and 7).[^ua-handle]
+3. The Teams client asks Entra ID for an access token for the SSO app. It uses the session of the user (step 8). Microsoft writes that this card "is used to get an access token from Microsoft Entra ID using `tokenExchangeResource`".[^ua-runtime]
+4. The Teams client has pre-authorization for the scope `access_as_user`. For this reason, Entra ID does not show a consent prompt.[^bot-clients]
+5. Entra ID returns the access token to the Teams client, because the Teams client sent the request (step 9). This access token is the SSO token. Its audience is the SSO app, and its authorized party is the Teams client (section 5).
+6. The Teams client sends the same invoke activity again, with the SSO token in it (steps 10 and 11).[^ua-runtime][^ua-receive]
+
+The SSO token is not a token for the downstream API. The bot uses it only as the assertion of the OBO request.[^obo-request]
+
+### 6.3 The sequence
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor U as User
-    participant T as Teams client
-    participant BC as Bot Connector
-    participant B as Bot
-    participant TS as BF token service
-    participant E as Entra ID
-    participant A as Downstream API
+    box User device
+        participant T as Teams client
+    end
+    box Microsoft cloud
+        participant E as Entra ID<br/>(gives tokens)
+        participant BC as Bot Connector<br/>(carries activities)
+        participant TS as BF token service<br/>(OAuth connection)
+    end
+    box Your Azure subscription
+        participant B as Bot<br/>(your code)
+        participant A as Downstream API
+    end
 
+    Note over U,A: A. First invoke: the bot asks the Teams client for an SSO token
     U->>T: Clicks "Call downstream API" (Action.Execute)
     T->>BC: adaptiveCard/action invoke
-    BC->>B: POST /api/messages (service token, no user token)
-    B->>TS: GetSignInResource (OAuth connection)
-    TS-->>B: Sign-in link + tokenExchangeResource
-    B-->>T: HTTP 200, body statusCode 401, loginRequest
-    T->>E: Token request for api://botid-‹SSO app ID›
-    E-->>T: SSO token
-    T->>B: Same invoke + value.authentication.token
+    BC->>B: POST /api/messages (invoke + service token, no user token)
+    B->>TS: GetSignInResource (OAuth connection "sso")
+    TS-->>B: Sign-in link + tokenExchangeResource (api://botid-‹SSO app ID›)
+    B-->>BC: HTTP 200 response to step 3: loginRequest (statusCode 401)
+    BC-->>T: loginRequest
+
+    Note over U,A: B. The Teams client gets the SSO token from Entra ID, with the Teams sign-in of the user
+    T->>E: Access token request for api://botid-‹SSO app ID›/access_as_user
+    Note over T,E: Teams is pre-authorized for access_as_user, so there is no prompt
+    E-->>T: SSO token (aud = SSO app, azp = Teams client)
+
+    Note over U,A: C. Second invoke: the bot exchanges the SSO token (OBO) and calls the API
+    T->>BC: Same invoke + value.authentication.token (the SSO token)
+    BC->>B: POST /api/messages (invoke + service token)
     B->>B: Validate the SSO token
-    B->>E: OBO request (assertion = SSO token)
-    E-->>B: OBO token
+    B->>E: OBO request (assertion = SSO token, credential = managed identity token)
+    E-->>B: OBO token (aud = downstream API)
     B->>A: GET /api/me (Bearer OBO token)
     A->>A: Validate the OBO token
     A-->>B: 200 with user data
-    B-->>T: HTTP 200, body statusCode 200, new card
+    B-->>BC: HTTP 200 response to step 11: new card (statusCode 200)
+    BC-->>T: New card
 ```
 
 | Step | Description | Code |
 | --- | --- | --- |
 | 1 | The user clicks the `Action.Execute` button on the card. | `Cards.Welcome` |
-| 2 to 3 | Teams sends an `adaptiveCard/action` invoke activity.[^asdk-actions] The Bot Connector sends it to the bot with a service token. The bot validates the service token with the Microsoft sample code.[^connector-auth][^asdk-auth-sample] | `SsoBot`, `AdaptiveCards.OnActionExecute` |
-| 4 to 5 | The bot asks the token service for the sign-in resource of the OAuth connection. The response has a sign-in link and a `tokenExchangeResource`. The sign-in state must contain the app ID, or the token service does not return a `tokenExchangeResource`. The Agents SDK puts the app ID in the sign-in state.[^asdk-state] | `TokenServiceClient.GetSignInResourceAsync` |
-| 6 | The bot replies with a `loginRequest`. The body has `statusCode` 401 and the `tokenExchangeResource`.[^ua-handle] The HTTP status is 200, as in the Microsoft C# sample.[^sample-401][^botbuilder-invoke] The Agents SDK also uses HTTP status 200.[^asdk-route] The Bot Connector sends the reply to the Teams client. | `CardActionSso`, `CardActionResponses.LoginRequest` |
-| 7 to 8 | The Teams client uses the `tokenExchangeResource` to get a token from Entra ID.[^ua-handle] It uses the current session of the user. Entra ID returns the SSO token. | Teams client |
-| 9 | The Teams client sends the same invoke activity again, through the Bot Connector. The SSO token is in `value.authentication.token`.[^ua-receive] The Agents SDK type for this value has `authentication` and `state`.[^asdk-value] | `CardActionTurn.FromContext` |
-| 10 | The bot validates the SSO token. Section 12 gives the checks. | `SsoTokenValidator` |
-| 11 to 12 | The bot sends the OBO request to Entra ID as the SSO app. A managed identity token is the credential. Entra ID returns the OBO token. Section 7 gives the details.[^obo-request] | `OboTokenStrategy`, `MsalOboTokenAcquirer`, `SsoAppCredential` |
-| 13 to 15 | The bot sends a request to the downstream API with the OBO token. The API validates the token and returns the user data.[^miw-validation] | `DownstreamApiClient`, `src/DownstreamApi/Program.cs` |
-| 16 | The bot returns a new card. The HTTP status is 200, and the body has `statusCode` 200. | `Cards.Result` |
+| 2 to 3 | Teams sends an `adaptiveCard/action` invoke activity.[^asdk-actions] The Bot Connector sends it to the messaging endpoint of the bot, with its service token. The service token identifies the Bot Connector, not the user. The bot validates the service token with the Microsoft sample code.[^connector-auth][^asdk-auth-sample] | `SsoBot`, `AdaptiveCards.OnActionExecute` |
+| 4 to 5 | The bot asks the BF token service for the sign-in resource of the OAuth connection. The response has a sign-in link and a `tokenExchangeResource`. The sign-in state must contain the app ID, or the token service does not return a `tokenExchangeResource`. The Agents SDK puts the app ID in the sign-in state.[^asdk-state] | `TokenServiceClient.GetSignInResourceAsync` |
+| 6 to 7 | The bot replies with a `loginRequest`. The body has `statusCode` 401 and the `tokenExchangeResource`.[^ua-handle] The reply is the HTTP response to step 3. The HTTP status is 200, as in the Microsoft C# sample.[^sample-401][^botbuilder-invoke] The Agents SDK also uses HTTP status 200.[^asdk-route] The Bot Connector sends the reply to the Teams client. | `CardActionSso`, `CardActionResponses.LoginRequest` |
+| 8 to 9 | The Teams client uses the `tokenExchangeResource` to get a token from Entra ID.[^ua-handle][^ua-runtime] It uses the current session of the user. Entra ID returns the SSO token to the Teams client. Section 6.2 gives the reason. | Teams client |
+| 10 to 11 | The Teams client sends the same invoke activity again, through the Bot Connector. The SSO token is in `value.authentication.token`.[^ua-receive] The Agents SDK type for this value has `authentication` and `state`.[^asdk-value] | `CardActionTurn.FromContext` |
+| 12 | The bot validates the SSO token. Section 12 gives the checks. | `SsoTokenValidator` |
+| 13 to 14 | The bot sends the OBO request to Entra ID as the SSO app. A managed identity token is the credential. Entra ID returns the OBO token. Section 7 gives the details.[^obo-request] | `OboTokenStrategy`, `MsalOboTokenAcquirer`, `SsoAppCredential` |
+| 15 to 17 | The bot sends a request to the downstream API with the OBO token. The API validates the token and returns the user data.[^miw-validation] | `DownstreamApiClient`, `src/DownstreamApi/Program.cs` |
+| 18 to 19 | The bot returns a new card in the HTTP response to step 11. The HTTP status is 200, and the body has `statusCode` 200. The Bot Connector sends the card to the Teams client. | `Cards.Result` |
 
-NOTE: The bot does steps 4 to 9 on each click when `Sso:TokenStrategy` is `Obo`. For tabs, Microsoft documents that Teams keeps the SSO token in a cache.[^tab-cache] For bots, Microsoft does not document this behavior.
+NOTE: The bot does steps 4 to 11 on each click when `Sso:TokenStrategy` is `Obo`. For tabs, Microsoft documents that Teams keeps the SSO token in a cache.[^tab-cache] For bots, Microsoft does not document this behavior.
 
 ## 7 The OBO request
 
@@ -457,7 +497,7 @@ A full check against the STE dictionary is still necessary.
 - Microsoft Learn pages with a dagger (†): only a search summary of the page agrees with the claim. Read these pages before you rely on them.
 - GitHub links: the Microsoft source code agrees with the claim. The links go to the lines at a fixed version.
 
-[^ua-runtime]: [Enable SSO for Adaptive Cards Universal Actions: SSO in Teams at runtime](https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/universal-actions-for-adaptive-cards/enable-sso-for-your-adaptive-cards-universal-action#sso-in-teams-at-runtime). The table shows the Teams client, Entra ID, the bot and the token service in the SSO flow.
+[^ua-runtime]: [Enable SSO for Adaptive Cards Universal Actions: SSO in Teams at runtime](https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/universal-actions-for-adaptive-cards/enable-sso-for-your-adaptive-cards-universal-action#sso-in-teams-at-runtime). The access token is "for the Teams app user who's signed in". The OAuth card "is used to get an access token from Microsoft Entra ID using `tokenExchangeResource`". Then the "Teams client resends the invoke `Action.Execute` request to the bot along with the token."
 [^ua-handle]: [Add code to enable SSO for Adaptive Cards Universal Actions: Add code to handle an access token](https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/universal-actions-for-adaptive-cards/sso-adaptive-cards-universal-action#add-code-to-handle-an-access-token). Gives the 401 `loginRequest` with `tokenExchangeResource`, and the install prompt for the personal scope.
 [^ua-receive]: [Add code to enable SSO for Adaptive Cards Universal Actions: Add code to receive the token](https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/universal-actions-for-adaptive-cards/sso-adaptive-cards-universal-action#add-code-to-receive-the-token). Gives `value.authentication.token`, the 412 `preconditionFailed` reply and the Sign in fallback.
 [^ua-flow]: [Add third party authentication to Adaptive Cards Universal Actions: Getting started with OAuth or nominal sign-on flow](https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/universal-actions-for-adaptive-cards/authentication-flow-in-universal-action-for-adaptive-cards#getting-started-with-oauth-or-nominal-sign-on-flow). Gives the Sign in button and the "state field containing the authorization code".
@@ -513,3 +553,6 @@ A full check against the STE dictionary is still necessary.
 [^asdk-auth-sample]: [Agents SDK for .NET source: AgentHostExtensions.cs, lines 106 to 108](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Hosting/AspNetCore/AgentHostExtensions.cs#L106-L108). "The sample-provided `AddAgentAspNetAuthentication` is the default implementation".
 [^asdk-auth-dev]: [Agents SDK for .NET source: AgentHostExtensions.cs, line 136](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Hosting/AspNetCore/AgentHostExtensions.cs#L136). Without `forceEnable`, validation is on only outside the Development environment.
 [^asdk-debug-log]: [Agents SDK for .NET source: ChannelServiceAdapterBase.cs, lines 228 to 231](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Builder/Microsoft.Agents.Builder/ChannelServiceAdapterBase.cs#L228-L231). At `Debug` level, the adapter writes the activity JSON to the log.
+[^asdk-hosts]: [Agents SDK for .NET source: OutboundHostValidator.cs, lines 77 to 78](https://github.com/microsoft/Agents-for-net/blob/d2493a5feebaaf742a456d24f8caa9878d3f2373/src/libraries/Builder/Microsoft.Agents.Builder/OutboundHostValidator.cs#L77-L78). `botframework.com` is for "Bot Connector / channel service URLs". `smba.trafficmanager.net` is for "Teams service URLs".
+[^bot-endpoint]: [Configure your bot app in Microsoft Entra ID: To configure messaging endpoint for your bot resource](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-register-aad?tabs=botid#to-configure-messaging-endpoint-for-your-bot-resource).
+[^sso-runtime]: [Enable SSO for your bot app: SSO in Teams at runtime](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/authentication/bot-sso-overview#sso-in-teams-at-runtime). "The token for the app user is stored in the Bot Framework Token Store."
